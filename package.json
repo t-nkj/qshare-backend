@@ -9,7 +9,7 @@
     },
     "scripts": {
         "build": "prisma generate && tsc -p tsconfig.build.json",
-        "start": "pnpm migrate && node dist/server.js",
+        "start": "prisma migrate deploy && node dist/server.js",
         "dev": "tsx watch src/server.ts",
         "migrate": "prisma migrate deploy",
         "postinstall": "prisma generate",

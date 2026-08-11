@@ -50,14 +50,16 @@ pnpm用install buildpackを含まないため、pnpm必須のこのプロジェ�
 - Build設定: `Runtime Command`
 - Base Image: `node:24-alpine`
 - Build Command: `corepack enable && corepack prepare pnpm@11.20.0 --activate && pnpm install --frozen-lockfile && pnpm build`
-- Entrypoint: `pnpm`
-- Command: `start`
+- Entrypoint: `corepack`
+- Command: `pnpm start`
 - HTTP Port: アプリ環境変数`PORT`と同じ値
 - Use MariaDB: 有効
 - 部員認証: クライアントの登録導線に合わせて`Soft`
 
 NeoShowcaseでは`.env`を手作業でコンテナへ置いても再起動で消えるため、`.env`と同じキーをアプリの
-環境変数として設定します。少なくともMariaDB接続情報をまとめた`DATABASE_URL`が必要です。
+環境変数として設定します。`DATABASE_URL`がなければ、NeoShowcaseが発行する
+`NS_MARIADB_DATABASE`、`NS_MARIADB_HOSTNAME`、`NS_MARIADB_PASSWORD`、`NS_MARIADB_PORT`、
+`NS_MARIADB_USER`から自動で接続 URL を組み立てます。
 
 ## 品質確認
 

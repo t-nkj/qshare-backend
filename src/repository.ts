@@ -1,5 +1,6 @@
 import { PrismaMariaDb } from "@prisma/adapter-mariadb"
 import { type Device, PrismaClient, type SharedUrl } from "@prisma/client"
+import { getDatabaseUrl } from "./database-url.js"
 import type {
     AuthenticatedDevice,
     CreateDeviceInput,
@@ -32,8 +33,9 @@ function mapUrl(sharedUrl: SharedUrl): SharedUrlRecord {
 }
 
 export async function createPrismaRepository(env: NodeJS.ProcessEnv = process.env): Promise<PrismaRepository> {
-    if (!env.DATABASE_URL) throw new Error("DATABASE_URL is required")
-    const adapter = new PrismaMariaDb(env.DATABASE_URL)
+    const databaseUrl = getDatabaseUrl(env)
+    if (!databaseUrl) throw new Error("DATABASE_URL or NeoShowcase MariaDB environment variables are required")
+    const adapter = new PrismaMariaDb(databaseUrl)
     const prisma = new PrismaClient({ adapter })
     await prisma.$connect()
     return new PrismaRepository(prisma)
