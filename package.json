@@ -1,0 +1,37 @@
+{
+    "name": "qshare-backend",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "packageManager": "pnpm@11.20.0",
+    "engines": {
+        "node": ">=24"
+    },
+    "scripts": {
+        "build": "prisma generate && tsc -p tsconfig.build.json",
+        "start": "pnpm migrate && node dist/server.js",
+        "dev": "tsx watch src/server.ts",
+        "migrate": "prisma migrate deploy",
+        "postinstall": "prisma generate",
+        "test": "node --import tsx --test test/**/*.test.ts",
+        "lint": "biome lint .",
+        "format": "biome format --write .",
+        "format:check": "biome format .",
+        "typecheck": "tsc --noEmit",
+        "check": "biome check . && pnpm typecheck"
+    },
+    "dependencies": {
+        "@hono/node-server": "^2.1.0",
+        "@prisma/adapter-mariadb": "^7.9.1",
+        "@prisma/client": "^7.9.1",
+        "dotenv": "^17.4.2",
+        "hono": "^4.13.1",
+        "prisma": "^7.9.1"
+    },
+    "devDependencies": {
+        "@biomejs/biome": "^2.5.8",
+        "@types/node": "^24.13.3",
+        "tsx": "^4.23.12",
+        "typescript": "^5.9.3"
+    }
+}
