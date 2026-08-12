@@ -57,11 +57,12 @@ RUST_LOG="qshare_backend=info,tower_http=info"
 
 ## NeoShowcase
 
-Rustは標準のパッケージ管理とビルド方法を使っているため、Runtime Buildpackを使います。
+NeoShowcaseの標準Runtime BuildpackはRust/Cargoを含まないため、`Runtime Command`を使います。
 
-- Build設定: `Runtime Buildpack`
-- Context: `.`
-- Entrypoint: 空欄
+- Build設定: `Runtime Command`
+- Base Image: `rust:latest`
+- Build Command: `cargo build --release --locked`
+- Entrypoint: `./target/release/qshare-backend`
 - Command: 空欄
 - HTTP Port: アプリ環境変数`PORT`と同じ値
 - Use MariaDB: 有効
