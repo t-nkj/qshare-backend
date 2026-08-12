@@ -1,8 +1,15 @@
 # QShare backend
 
-同じtraQ IDに属する複数端末でHTTP(S) URLを共有する、Hono製のJSON APIです。
+同じtraQ IDに属する複数端末でHTTP(S) URLを共有する、Rust製のJSON APIです。
 端末登録時だけNeoShowcaseの`X-Forwarded-User`を使い、以後は端末ごとのBearerトークンで認証します。
 登録画面などのクライアントUIは含みません。
+
+## 技術構成
+
+- Rust stable（現在の最小対応バージョンは1.97）
+- Axum / Tokio
+- MariaDB / SQLx
+- rustfmt / Clippy
 
 ## API
 
@@ -23,52 +30,58 @@
 
 ## ローカル開発
 
-Node.js 24とpnpm 11を使用します。DB接続情報は`.env`に保存します。
+MariaDBを用意してから、接続情報を`.env`に保存します。
 
 ```sh
 cp .env.example .env
-pnpm install
-pnpm migrate
-pnpm dev
+cargo run
 ```
+
+起動時にSQLxのマイグレーションが自動適用されます。既存のPrisma版が作成した
+`devices`と`shared_urls`も同じスキーマのまま利用できます。
 
 `.env`の例:
 
 ```dotenv
-DATABASE_URL="mysql://qshare:secret@127.0.0.1:3306/qshare"
+NS_MARIADB_DATABASE="qshare"
+NS_MARIADB_HOSTNAME="127.0.0.1"
+NS_MARIADB_PASSWORD="secret"
+NS_MARIADB_PORT="3306"
+NS_MARIADB_USER="qshare"
 PORT=3000
 CORS_ALLOWED_ORIGINS="chrome-extension://extension-id"
+RUST_LOG="qshare_backend=info,tower_http=info"
 ```
 
-`.env`はGit管理対象外です。Prisma Migrateと実行時のPrisma Clientは同じ`DATABASE_URL`を使います。
+接続URLはアプリ側で安全に組み立てるため、パスワードなどのURLエンコードは不要です。
 
 ## NeoShowcase
 
-添付のNeoShowcase資料に従い、アプリは次の設定でデプロイします。標準のPaketo Node Buildpackは
-pnpm用install buildpackを含まないため、pnpm必須のこのプロジェクトではRuntime Commandを使います。
+Rustは標準のパッケージ管理とビルド方法を使っているため、Runtime Buildpackを使います。
 
-- Build設定: `Runtime Command`
-- Base Image: `node:24-alpine`
-- Build Command: `corepack enable && corepack prepare pnpm@11.20.0 --activate && pnpm install --frozen-lockfile && pnpm build`
-- Entrypoint: `corepack`
-- Command: `pnpm start`
+- Build設定: `Runtime Buildpack`
+- Context: `.`
+- Entrypoint: 空欄
+- Command: 空欄
 - HTTP Port: アプリ環境変数`PORT`と同じ値
 - Use MariaDB: 有効
-- 部員認証: クライアントの登録導線に合わせて`Soft`
+- 部員認証: `Soft`
+- 公開URL: `https://qshare.trap.show/api`
+- Strip Path Prefix: 有効
 
-NeoShowcaseでは`.env`を手作業でコンテナへ置いても再起動で消えるため、`.env`と同じキーをアプリの
-環境変数として設定します。`DATABASE_URL`がなければ、NeoShowcaseが発行する
-`NS_MARIADB_DATABASE`、`NS_MARIADB_HOSTNAME`、`NS_MARIADB_PASSWORD`、`NS_MARIADB_PORT`、
-`NS_MARIADB_USER`から自動で接続 URL を組み立てます。
+ローカル・NeoShowcaseともに、以下の環境変数からMariaDB接続URLを自動生成します。
+
+- `NS_MARIADB_DATABASE`
+- `NS_MARIADB_HOSTNAME`
+- `NS_MARIADB_PASSWORD`
+- `NS_MARIADB_PORT`
+- `NS_MARIADB_USER`
 
 ## 品質確認
 
 ```sh
-pnpm format
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+cargo build --release --locked
 ```
-
-Biomeはダブルクオート、セミコロンなし、4スペースインデント、末尾カンマなしで設定されています。
