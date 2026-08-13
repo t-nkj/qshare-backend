@@ -1,8 +1,4 @@
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -15,7 +11,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tower_http::trace::TraceLayer;
+use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 use uuid::Uuid;
 
 use crate::{error::ApiError, model::AuthenticatedDevice, repository::Repository};
@@ -27,7 +23,6 @@ pub struct AppState {
     repository: Arc<dyn Repository>,
     allowed_origins: Arc<HashSet<String>>,
     clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
-    file_storage_dir: Arc<PathBuf>,
 }
 
 impl AppState {
@@ -36,7 +31,6 @@ impl AppState {
             repository,
             allowed_origins: Arc::new(cors_allowed_origins.into_iter().collect()),
             clock: Arc::new(Utc::now),
-            file_storage_dir: Arc::new(PathBuf::from("/tmp/qshare-files")),
         }
     }
 
@@ -53,15 +47,6 @@ impl AppState {
     pub(crate) fn repository(&self) -> &Arc<dyn Repository> {
         &self.repository
     }
-
-    pub fn with_file_storage_dir(mut self, directory: PathBuf) -> Self {
-        self.file_storage_dir = Arc::new(directory);
-        self
-    }
-
-    pub(crate) fn file_storage_dir(&self) -> &Path {
-        self.file_storage_dir.as_ref()
-    }
 }
 
 pub fn create_app(state: AppState) -> Router {
@@ -70,9 +55,9 @@ pub fn create_app(state: AppState) -> Router {
         .merge(crate::device::routes())
         .merge(crate::url::routes())
         .merge(crate::memo::routes())
-        .merge(crate::file::routes())
         .merge(crate::latest::routes())
         .fallback(not_found)
+        .layer(RequestBodyLimitLayer::new(JSON_BODY_LIMIT))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(state.clone(), response_middleware))
         .with_state(state)
@@ -117,13 +102,6 @@ fn invalid_token() -> ApiError {
 }
 
 pub(crate) fn json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, ApiError> {
-    if body.len() > JSON_BODY_LIMIT {
-        return Err(ApiError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "JSON_BODY_TOO_LARGE",
-            "JSON request body must not exceed 16 KiB",
-        ));
-    }
     let is_json = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())

@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{env, net::SocketAddr};
 
 use url::Url;
 
@@ -8,7 +8,6 @@ pub struct Config {
     pub address: SocketAddr,
     pub database_url: String,
     pub cors_allowed_origins: Vec<String>,
-    pub file_storage_dir: PathBuf,
 }
 
 impl Config {
@@ -29,15 +28,11 @@ impl Config {
             .filter(|origin| !origin.is_empty())
             .map(str::to_owned)
             .collect();
-        let file_storage_dir = env::var("FILE_STORAGE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp/qshare-files"));
 
         Ok(Self {
             address,
             database_url,
             cors_allowed_origins,
-            file_storage_dir,
         })
     }
 }

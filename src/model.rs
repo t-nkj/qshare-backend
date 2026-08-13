@@ -49,23 +49,6 @@ pub struct SharedMemo {
     pub expires_at: NaiveDateTime,
 }
 
-#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct SharedFile {
-    pub id: String,
-    pub name: String,
-    pub content_type: String,
-    pub size: u64,
-    pub source_device_id: Option<String>,
-    pub source_device_name: String,
-    #[serde(serialize_with = "serialize_datetime")]
-    pub created_at: NaiveDateTime,
-    #[serde(serialize_with = "serialize_datetime")]
-    pub updated_at: NaiveDateTime,
-    #[serde(serialize_with = "serialize_datetime")]
-    pub expires_at: NaiveDateTime,
-}
-
 #[derive(Clone, Debug, serde::Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UrlCursor {

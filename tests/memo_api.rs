@@ -86,7 +86,7 @@ async fn lists_updates_and_deletes_owner_memos() {
     let latest = later
         .clone()
         .oneshot(
-            Request::get("/v1/latest/m")
+            Request::get("/v1/memos/latest")
                 .header("authorization", format!("Bearer {alice_token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -94,9 +94,7 @@ async fn lists_updates_and_deletes_owner_memos() {
         .await
         .unwrap();
     assert_eq!(latest.status(), StatusCode::OK);
-    let latest = json_response(latest).await;
-    assert_eq!(latest["type"], "memo");
-    assert_eq!(latest["memo"]["id"], memo_id);
+    assert_eq!(json_response(latest).await["memo"]["id"], memo_id);
 
     let forbidden_delete = later
         .clone()
@@ -174,7 +172,7 @@ async fn paginates_and_expires_memos() {
     let expired_app = test_app_at(repository, Vec::new(), "2026-08-19T00:01:00.001Z");
     let expired = expired_app
         .oneshot(
-            Request::get("/v1/latest/m")
+            Request::get("/v1/memos/latest")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -182,5 +180,5 @@ async fn paginates_and_expires_memos() {
         .await
         .unwrap();
     assert_eq!(expired.status(), StatusCode::NOT_FOUND);
-    assert_eq!(json_response(expired).await["error"]["code"], "LATEST_NOT_FOUND");
+    assert_eq!(json_response(expired).await["error"]["code"], "MEMO_NOT_FOUND");
 }

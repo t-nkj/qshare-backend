@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     routing::get,
 };
@@ -9,69 +9,33 @@ use serde::Serialize;
 use crate::{
     app::{AppState, authenticate_at},
     error::ApiError,
-    model::{SharedFile, SharedMemo, SharedUrl},
+    model::{SharedMemo, SharedUrl},
 };
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/v1/latest/{types}", get(latest))
+    Router::new().route("/v1/latest", get(latest))
 }
 
-async fn latest(
-    State(state): State<AppState>,
-    Path(types): Path<String>,
-    headers: HeaderMap,
-) -> Result<Json<Latest>, ApiError> {
-    let types = LatestTypes::parse(&types)?;
-    latest_for_types(state, types, headers).await
-}
-
-async fn latest_for_types(state: AppState, types: LatestTypes, headers: HeaderMap) -> Result<Json<Latest>, ApiError> {
+async fn latest(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Latest>, ApiError> {
     let now = state.now();
     let actor = authenticate_at(&state, &headers, now).await?;
-    let url = if types.url {
-        state
-            .repository()
-            .get_latest_url(&actor.user_id, now.naive_utc())
-            .await
-            .map_err(ApiError::internal)?
-    } else {
-        None
-    };
-    let memo = if types.memo {
-        state
-            .repository()
-            .get_latest_memo(&actor.user_id, now.naive_utc())
-            .await
-            .map_err(ApiError::internal)?
-    } else {
-        None
-    };
-    let file = if types.file {
-        state
-            .repository()
-            .get_latest_file(&actor.user_id, now.naive_utc())
-            .await
-            .map_err(ApiError::internal)?
-    } else {
-        None
-    };
+    let url = state
+        .repository()
+        .get_latest_url(&actor.user_id, now.naive_utc())
+        .await
+        .map_err(ApiError::internal)?;
+    let memo = state
+        .repository()
+        .get_latest_memo(&actor.user_id, now.naive_utc())
+        .await
+        .map_err(ApiError::internal)?;
 
-    let mut latest = Vec::new();
-    if let Some(url) = url {
-        latest.push((url.created_at, 2_u8, Latest::Url { url }));
-    }
-    if let Some(memo) = memo {
-        latest.push((memo.updated_at, 3_u8, Latest::Memo { memo }));
-    }
-    if let Some(file) = file {
-        latest.push((file.updated_at, 1_u8, Latest::File { file }));
-    }
-    match latest
-        .into_iter()
-        .max_by_key(|(updated_at, priority, _)| (*updated_at, *priority))
-    {
-        Some((_, _, value)) => Ok(Json(value)),
-        None => Err(ApiError::new(
+    match (url, memo) {
+        (Some(url), Some(memo)) if url.created_at > memo.updated_at => Ok(Json(Latest::Url { url })),
+        (Some(_), Some(memo)) => Ok(Json(Latest::Memo { memo })),
+        (Some(url), None) => Ok(Json(Latest::Url { url })),
+        (None, Some(memo)) => Ok(Json(Latest::Memo { memo })),
+        (None, None) => Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "LATEST_NOT_FOUND",
             "no unexpired URL or memo was found",
@@ -84,45 +48,4 @@ async fn latest_for_types(state: AppState, types: LatestTypes, headers: HeaderMa
 enum Latest {
     Url { url: SharedUrl },
     Memo { memo: SharedMemo },
-    File { file: SharedFile },
-}
-
-struct LatestTypes {
-    file: bool,
-    url: bool,
-    memo: bool,
-}
-
-impl LatestTypes {
-    fn parse(value: &str) -> Result<Self, ApiError> {
-        let mut result = Self {
-            file: false,
-            url: false,
-            memo: false,
-        };
-        for item in value.bytes() {
-            let slot = match item {
-                b'f' => &mut result.file,
-                b'u' => &mut result.url,
-                b'm' => &mut result.memo,
-                _ => {
-                    return Err(ApiError::bad_request(
-                        "INVALID_LATEST_TYPES",
-                        "types must contain only f, u, and m",
-                    ));
-                }
-            };
-            if *slot {
-                return Err(ApiError::bad_request(
-                    "INVALID_LATEST_TYPES",
-                    "types must not contain duplicates",
-                ));
-            }
-            *slot = true;
-        }
-        if !(result.file || result.url || result.memo) {
-            return Err(ApiError::bad_request("INVALID_LATEST_TYPES", "types must not be empty"));
-        }
-        Ok(result)
-    }
 }

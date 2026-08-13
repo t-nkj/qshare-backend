@@ -37,7 +37,7 @@ async fn returns_the_latest_url_or_memo() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/v1/latest/u")
+                .uri("/v1/latest")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -52,7 +52,7 @@ async fn returns_the_latest_url_or_memo() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/v1/latest/um")
+                .uri("/v1/latest")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -65,41 +65,6 @@ async fn returns_the_latest_url_or_memo() {
 }
 
 #[tokio::test]
-async fn returns_the_latest_url_or_memo_from_the_combined_types_endpoint() {
-    let repository = Arc::new(MemoryRepository::default());
-    let app = test_app(repository, vec![]);
-    let registered = register(&app, "alice", "iPhone").await;
-    let token = registered["token"].as_str().unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/urls")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(json!({ "url": "https://example.com/" }).to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/v1/latest/mu")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(json_response(response).await["type"], "url");
-}
-
-#[tokio::test]
 async fn reports_not_found_when_no_content_exists() {
     let repository = Arc::new(MemoryRepository::default());
     let app = test_app(repository, vec![]);
@@ -108,7 +73,7 @@ async fn reports_not_found_when_no_content_exists() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/latest/fum")
+                .uri("/v1/latest")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
