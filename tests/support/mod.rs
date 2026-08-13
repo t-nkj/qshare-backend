@@ -10,8 +10,10 @@ use axum::{
 use chrono::{DateTime, NaiveDateTime, Utc};
 use qshare_backend::{
     app::{AppState, create_app},
-    model::{AuthenticatedDevice, Device, SharedMemo, SharedUrl, UrlCursor},
-    repository::{CreateDevice, CreateMemoBundle, CreateUrl, CreatedMemoItem, Repository},
+    model::{AuthenticatedDevice, Device, SharedFile, SharedMemo, SharedUrl, UrlCursor},
+    repository::{
+        CreateDevice, CreateFile, CreateMemoBundle, CreateUrl, CreatedFile, CreatedMemoItem, FileRecord, Repository,
+    },
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -35,11 +37,19 @@ struct StoredMemo {
     memo: SharedMemo,
 }
 
+#[derive(Clone)]
+struct StoredFile {
+    user_id: String,
+    storage_key: String,
+    file: SharedFile,
+}
+
 #[derive(Default)]
 pub struct MemoryRepository {
     devices: Mutex<Vec<StoredDevice>>,
     urls: Mutex<Vec<StoredUrl>>,
     memos: Mutex<Vec<StoredMemo>>,
+    files: Mutex<Vec<StoredFile>>,
 }
 
 impl MemoryRepository {
@@ -128,6 +138,11 @@ impl Repository for MemoryRepository {
         for stored in self.memos.lock().unwrap().iter_mut() {
             if stored.memo.source_device_id.as_deref() == Some(id) {
                 stored.memo.source_device_id = None;
+            }
+        }
+        for stored in self.files.lock().unwrap().iter_mut() {
+            if stored.file.source_device_id.as_deref() == Some(id) {
+                stored.file.source_device_id = None;
             }
         }
         Ok(true)
@@ -245,7 +260,7 @@ impl Repository for MemoryRepository {
             .unwrap()
             .iter()
             .filter(|memo| memo.user_id == user_id && memo.memo.expires_at > now)
-            .max_by_key(|memo| (memo.memo.created_at, memo.memo.id.clone()))
+            .max_by_key(|memo| (memo.memo.updated_at, memo.memo.id.clone()))
             .map(|memo| memo.memo.clone()))
     }
 
@@ -313,6 +328,169 @@ impl Repository for MemoryRepository {
         let before = memos.len();
         memos.retain(|memo| memo.memo.expires_at > now);
         Ok((before - memos.len()) as u64)
+    }
+
+    async fn create_file_and_evict_once(&self, input: CreateFile, maximum_bytes: u64) -> sqlx::Result<CreatedFile> {
+        let file = SharedFile {
+            id: input.id,
+            name: input.name,
+            content_type: input.content_type,
+            size: input.size,
+            source_device_id: Some(input.source_device_id),
+            source_device_name: input.source_device_name,
+            created_at: input.now,
+            updated_at: input.now,
+            expires_at: input.expires_at,
+        };
+        let mut files = self.files.lock().unwrap();
+        files.push(StoredFile {
+            user_id: input.user_id.clone(),
+            storage_key: input.storage_key,
+            file: file.clone(),
+        });
+        let mut indexes: Vec<_> = files
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.user_id == input.user_id)
+            .map(|(index, _)| index)
+            .collect();
+        indexes.sort_by_key(|index| {
+            (
+                files[*index].file.updated_at,
+                files[*index].file.id.clone() == file.id,
+                files[*index].file.id.clone(),
+            )
+        });
+        let mut total: u64 = indexes.iter().map(|index| files[*index].file.size).sum();
+        let mut evicted_ids = Vec::new();
+        for index in indexes {
+            if total <= maximum_bytes {
+                break;
+            }
+            total -= files[index].file.size;
+            evicted_ids.push(files[index].file.id.clone());
+        }
+        let mut evicted = Vec::new();
+        files.retain(|stored| {
+            if evicted_ids.contains(&stored.file.id) {
+                evicted.push(FileRecord {
+                    file: stored.file.clone(),
+                    storage_key: stored.storage_key.clone(),
+                });
+                false
+            } else {
+                true
+            }
+        });
+        Ok(CreatedFile { file, evicted })
+    }
+
+    async fn get_file(&self, user_id: &str, id: &str, now: NaiveDateTime) -> sqlx::Result<Option<FileRecord>> {
+        Ok(self
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|item| item.user_id == user_id && item.file.id == id && item.file.expires_at > now)
+            .map(|item| FileRecord {
+                file: item.file.clone(),
+                storage_key: item.storage_key.clone(),
+            }))
+    }
+
+    async fn get_latest_file(&self, user_id: &str, now: NaiveDateTime) -> sqlx::Result<Option<SharedFile>> {
+        Ok(self
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|item| item.user_id == user_id && item.file.expires_at > now)
+            .max_by_key(|item| (item.file.updated_at, item.file.id.clone()))
+            .map(|item| item.file.clone()))
+    }
+
+    async fn list_files(
+        &self,
+        user_id: &str,
+        now: NaiveDateTime,
+        limit: u32,
+        cursor: Option<&UrlCursor>,
+    ) -> sqlx::Result<Vec<SharedFile>> {
+        let mut files: Vec<_> = self
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|item| item.user_id == user_id && item.file.expires_at > now)
+            .filter(|item| {
+                cursor.is_none_or(|cursor| {
+                    item.file.created_at < cursor.created_at.naive_utc()
+                        || (item.file.created_at == cursor.created_at.naive_utc() && item.file.id < cursor.id)
+                })
+            })
+            .map(|item| item.file.clone())
+            .collect();
+        sort_newest(&mut files, |file| (file.created_at, file.id.clone()));
+        files.truncate(limit as usize + 1);
+        Ok(files)
+    }
+
+    async fn rename_file(
+        &self,
+        user_id: &str,
+        id: &str,
+        name: &str,
+        now: NaiveDateTime,
+        expires_at: NaiveDateTime,
+    ) -> sqlx::Result<Option<SharedFile>> {
+        let mut files = self.files.lock().unwrap();
+        let Some(file) = files
+            .iter_mut()
+            .find(|item| item.user_id == user_id && item.file.id == id)
+        else {
+            return Ok(None);
+        };
+        file.file.name = name.to_owned();
+        file.file.updated_at = now;
+        file.file.expires_at = expires_at;
+        Ok(Some(file.file.clone()))
+    }
+
+    async fn delete_file(&self, user_id: &str, id: &str) -> sqlx::Result<Option<FileRecord>> {
+        let mut files = self.files.lock().unwrap();
+        let Some(index) = files
+            .iter()
+            .position(|item| item.user_id == user_id && item.file.id == id)
+        else {
+            return Ok(None);
+        };
+        let file = files.remove(index);
+        Ok(Some(FileRecord {
+            file: file.file,
+            storage_key: file.storage_key,
+        }))
+    }
+
+    async fn delete_expired_files(&self, now: NaiveDateTime) -> sqlx::Result<Vec<FileRecord>> {
+        let mut files = self.files.lock().unwrap();
+        let mut deleted = Vec::new();
+        files.retain(|item| {
+            if item.file.expires_at <= now {
+                deleted.push(FileRecord {
+                    file: item.file.clone(),
+                    storage_key: item.storage_key.clone(),
+                });
+                false
+            } else {
+                true
+            }
+        });
+        Ok(deleted)
+    }
+
+    async fn clear_files(&self) -> sqlx::Result<()> {
+        self.files.lock().unwrap().clear();
+        Ok(())
     }
 }
 

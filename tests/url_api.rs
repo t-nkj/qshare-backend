@@ -10,7 +10,7 @@ use support::{MemoryRepository, json_response, register, test_app};
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn shares_only_http_urls_and_returns_latest() {
+async fn shares_only_http_urls_and_returns_latest_url() {
     let app = test_app(Arc::new(MemoryRepository::default()), Vec::new());
     let created = register(&app, "alice", "iPhone").await;
     let token = created["token"].as_str().unwrap();
@@ -45,7 +45,7 @@ async fn shares_only_http_urls_and_returns_latest() {
 
     let latest = app
         .oneshot(
-            Request::get("/v1/urls/latest")
+            Request::get("/v1/latest/u")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -53,5 +53,7 @@ async fn shares_only_http_urls_and_returns_latest() {
         .await
         .unwrap();
     assert_eq!(latest.status(), StatusCode::OK);
-    assert_eq!(json_response(latest).await["url"]["url"], "https://example.com/a?b=1#c");
+    let latest = json_response(latest).await;
+    assert_eq!(latest["type"], "url");
+    assert_eq!(latest["url"]["url"], "https://example.com/a?b=1#c");
 }

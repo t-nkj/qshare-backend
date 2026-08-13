@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::post,
 };
 use chrono::Duration;
 use serde::Serialize;
@@ -21,7 +21,6 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/urls", post(create_url).get(list_urls))
-        .route("/v1/urls/latest", get(latest_url))
         .route("/v1/urls/{url_id}", axum::routing::delete(delete_url))
 }
 
@@ -48,18 +47,6 @@ async fn create_url(
         .await
         .map_err(ApiError::internal)?;
     Ok((StatusCode::CREATED, Json(UrlEnvelope { url: shared_url })))
-}
-
-async fn latest_url(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<UrlEnvelope>, ApiError> {
-    let now = state.now();
-    let actor = authenticate_at(&state, &headers, now).await?;
-    let url = state
-        .repository()
-        .get_latest_url(&actor.user_id, now.naive_utc())
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "URL_NOT_FOUND", "no unexpired URL was found"))?;
-    Ok(Json(UrlEnvelope { url }))
 }
 
 async fn list_urls(

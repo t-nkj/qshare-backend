@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, patch, post},
+    routing::{patch, post},
 };
 use chrono::Duration;
 use serde::Serialize;
@@ -21,7 +21,6 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/memos", post(create_memo).get(list_memos))
-        .route("/v1/memos/latest", get(latest_memo))
         .route("/v1/memos/{memo_id}", patch(update_memo).delete(delete_memo))
 }
 
@@ -74,18 +73,6 @@ async fn create_memo(
         .map(Created::from)
         .collect();
     Ok((StatusCode::CREATED, Json(MemoCreated { created })))
-}
-
-async fn latest_memo(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MemoEnvelope>, ApiError> {
-    let now = state.now();
-    let actor = authenticate_at(&state, &headers, now).await?;
-    let memo = state
-        .repository()
-        .get_latest_memo(&actor.user_id, now.naive_utc())
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "MEMO_NOT_FOUND", "no unexpired memo was found"))?;
-    Ok(Json(MemoEnvelope { memo }))
 }
 
 async fn list_memos(

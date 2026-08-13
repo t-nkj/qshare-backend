@@ -2,6 +2,7 @@ pub mod app;
 pub mod config;
 pub mod device;
 pub mod error;
+pub mod file;
 pub mod latest;
 pub mod memo;
 pub mod model;
