@@ -23,10 +23,42 @@
 | `GET` | `/v1/urls/latest` | Bearer | 最新URL取得 |
 | `GET` | `/v1/urls` | Bearer | 7日以内の履歴取得 |
 | `DELETE` | `/v1/urls/{urlId}` | Bearer | URL削除 |
+| `POST` | `/v1/memos` | Bearer | メモ追加（URL自動判定対応） |
+| `GET` | `/v1/memos/latest` | Bearer | 最新メモ取得 |
+| `GET` | `/v1/memos` | Bearer | 7日以内のメモ履歴取得 |
+| `PATCH` | `/v1/memos/{memoId}` | Bearer | メモ編集 |
+| `DELETE` | `/v1/memos/{memoId}` | Bearer | メモ削除 |
 | `GET` | `/healthz` | なし | ヘルスチェック |
 
 `GET /v1/urls`は`limit`（既定50、最大100）とカーソルによるページングに対応します。
+`GET /v1/memos`も同じページングに対応します。メモ本文は最大10,000文字です。
 エラーは`{"error":{"code":"...","message":"..."}}`形式です。
+
+## メモのURL自動判定
+
+`POST /v1/memos`は次の形式です。
+
+```json
+{
+  "content": "確認して https://example.com/ と [資料](https://example.org/)",
+  "autoDetectUrls": true
+}
+```
+
+`autoDetectUrls`は省略時`false`です。`true`の場合、HTTP(S)の裸URLとMarkdownリンク先を出現順にURL履歴へ追加してから、元の本文のままメモを追加します。同一URLは1リクエスト中に1件だけ追加されます。
+
+本文が前後の空白を除いて裸のHTTP(S) URLだけなら、メモは作らずURLだけを追加します。応答は常に作成順の`created`配列です。
+
+```json
+{
+  "created": [
+    { "type": "url", "url": { "id": "...", "url": "https://example.com/" } },
+    { "type": "memo", "memo": { "id": "...", "content": "確認して https://example.com/" } }
+  ]
+}
+```
+
+メモは作成・編集から7日間保持されます。編集時にURL自動判定は行いません。
 
 ## ローカル開発
 

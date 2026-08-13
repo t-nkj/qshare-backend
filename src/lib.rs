@@ -1,6 +1,9 @@
 pub mod app;
 pub mod config;
+pub mod device;
 pub mod error;
+pub mod memo;
 pub mod model;
 pub mod repository;
+pub mod url;
 pub mod validation;

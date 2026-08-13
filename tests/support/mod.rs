@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -8,8 +10,8 @@ use axum::{
 use chrono::{DateTime, NaiveDateTime, Utc};
 use qshare_backend::{
     app::{AppState, create_app},
-    model::{AuthenticatedDevice, Device, SharedUrl, UrlCursor},
-    repository::{CreateDevice, CreateUrl, Repository},
+    model::{AuthenticatedDevice, Device, SharedMemo, SharedUrl, UrlCursor},
+    repository::{CreateDevice, CreateMemoBundle, CreateUrl, CreatedMemoItem, Repository},
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -27,10 +29,27 @@ struct StoredUrl {
     url: SharedUrl,
 }
 
+#[derive(Clone)]
+struct StoredMemo {
+    user_id: String,
+    memo: SharedMemo,
+}
+
 #[derive(Default)]
-struct MemoryRepository {
+pub struct MemoryRepository {
     devices: Mutex<Vec<StoredDevice>>,
     urls: Mutex<Vec<StoredUrl>>,
+    memos: Mutex<Vec<StoredMemo>>,
+}
+
+impl MemoryRepository {
+    pub fn memo_count(&self) -> usize {
+        self.memos.lock().unwrap().len()
+    }
+
+    pub fn url_count(&self) -> usize {
+        self.urls.lock().unwrap().len()
+    }
 }
 
 #[async_trait]
@@ -106,6 +125,11 @@ impl Repository for MemoryRepository {
                 stored.url.source_device_id = None;
             }
         }
+        for stored in self.memos.lock().unwrap().iter_mut() {
+            if stored.memo.source_device_id.as_deref() == Some(id) {
+                stored.memo.source_device_id = None;
+            }
+        }
         Ok(true)
     }
 
@@ -157,12 +181,7 @@ impl Repository for MemoryRepository {
             })
             .map(|url| url.url.clone())
             .collect();
-        urls.sort_by(|left, right| {
-            right
-                .created_at
-                .cmp(&left.created_at)
-                .then_with(|| right.id.cmp(&left.id))
-        });
+        sort_newest(&mut urls, |url| (url.created_at, url.id.clone()));
         urls.truncate(limit as usize + 1);
         Ok(urls)
     }
@@ -182,20 +201,139 @@ impl Repository for MemoryRepository {
         urls.retain(|url| url.url.expires_at > now);
         Ok((before - urls.len()) as u64)
     }
+
+    async fn create_memo_bundle(&self, input: CreateMemoBundle) -> sqlx::Result<Vec<CreatedMemoItem>> {
+        let mut created = Vec::new();
+        for input in input.urls {
+            let url = SharedUrl {
+                id: input.id,
+                url: input.url,
+                source_device_id: Some(input.source_device_id),
+                source_device_name: input.source_device_name,
+                created_at: input.now,
+                expires_at: input.expires_at,
+            };
+            self.urls.lock().unwrap().push(StoredUrl {
+                user_id: input.user_id,
+                url: url.clone(),
+            });
+            created.push(CreatedMemoItem::Url(url));
+        }
+        if let Some(input) = input.memo {
+            let memo = SharedMemo {
+                id: input.id,
+                content: input.content,
+                source_device_id: Some(input.source_device_id),
+                source_device_name: input.source_device_name,
+                created_at: input.now,
+                updated_at: input.now,
+                expires_at: input.expires_at,
+            };
+            self.memos.lock().unwrap().push(StoredMemo {
+                user_id: input.user_id,
+                memo: memo.clone(),
+            });
+            created.push(CreatedMemoItem::Memo(memo));
+        }
+        Ok(created)
+    }
+
+    async fn get_latest_memo(&self, user_id: &str, now: NaiveDateTime) -> sqlx::Result<Option<SharedMemo>> {
+        Ok(self
+            .memos
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|memo| memo.user_id == user_id && memo.memo.expires_at > now)
+            .max_by_key(|memo| (memo.memo.created_at, memo.memo.id.clone()))
+            .map(|memo| memo.memo.clone()))
+    }
+
+    async fn list_memos(
+        &self,
+        user_id: &str,
+        now: NaiveDateTime,
+        limit: u32,
+        cursor: Option<&UrlCursor>,
+    ) -> sqlx::Result<Vec<SharedMemo>> {
+        let mut memos: Vec<_> = self
+            .memos
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|memo| memo.user_id == user_id && memo.memo.expires_at > now)
+            .filter(|memo| {
+                cursor.is_none_or(|cursor| {
+                    memo.memo.created_at < cursor.created_at.naive_utc()
+                        || (memo.memo.created_at == cursor.created_at.naive_utc() && memo.memo.id < cursor.id)
+                })
+            })
+            .map(|memo| memo.memo.clone())
+            .collect();
+        sort_newest(&mut memos, |memo| (memo.created_at, memo.id.clone()));
+        memos.truncate(limit as usize + 1);
+        Ok(memos)
+    }
+
+    async fn update_memo(
+        &self,
+        user_id: &str,
+        id: &str,
+        content: &str,
+        now: NaiveDateTime,
+        expires_at: NaiveDateTime,
+    ) -> sqlx::Result<Option<SharedMemo>> {
+        let mut memos = self.memos.lock().unwrap();
+        let Some(stored) = memos
+            .iter_mut()
+            .find(|memo| memo.user_id == user_id && memo.memo.id == id)
+        else {
+            return Ok(None);
+        };
+        stored.memo.content = content.to_owned();
+        stored.memo.updated_at = now;
+        stored.memo.expires_at = expires_at;
+        Ok(Some(stored.memo.clone()))
+    }
+
+    async fn delete_memo(&self, user_id: &str, id: &str) -> sqlx::Result<bool> {
+        let mut memos = self.memos.lock().unwrap();
+        let Some(index) = memos
+            .iter()
+            .position(|memo| memo.user_id == user_id && memo.memo.id == id)
+        else {
+            return Ok(false);
+        };
+        memos.remove(index);
+        Ok(true)
+    }
+
+    async fn delete_expired_memos(&self, now: NaiveDateTime) -> sqlx::Result<u64> {
+        let mut memos = self.memos.lock().unwrap();
+        let before = memos.len();
+        memos.retain(|memo| memo.memo.expires_at > now);
+        Ok((before - memos.len()) as u64)
+    }
 }
 
-fn test_app(repository: Arc<MemoryRepository>, origins: Vec<String>) -> axum::Router {
-    let now = DateTime::parse_from_rfc3339("2026-08-12T00:00:00.000Z")
-        .unwrap()
-        .with_timezone(&Utc);
+fn sort_newest<T>(items: &mut [T], key: impl Fn(&T) -> (NaiveDateTime, String)) {
+    items.sort_by_key(|item| std::cmp::Reverse(key(item)));
+}
+
+pub fn test_app(repository: Arc<MemoryRepository>, origins: Vec<String>) -> axum::Router {
+    test_app_at(repository, origins, "2026-08-12T00:00:00.000Z")
+}
+
+pub fn test_app_at(repository: Arc<MemoryRepository>, origins: Vec<String>, now: &str) -> axum::Router {
+    let now = DateTime::parse_from_rfc3339(now).unwrap().with_timezone(&Utc);
     create_app(AppState::new(repository, origins).with_clock(move || now))
 }
 
-async fn json_response(response: axum::response::Response) -> Value {
+pub async fn json_response(response: axum::response::Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
 
-async fn register(app: &axum::Router, user: &str, name: &str) -> Value {
+pub async fn register(app: &axum::Router, user: &str, name: &str) -> Value {
     let response = app
         .clone()
         .oneshot(
@@ -211,126 +349,15 @@ async fn register(app: &axum::Router, user: &str, name: &str) -> Value {
     json_response(response).await
 }
 
-#[tokio::test]
-async fn registration_requires_traq_and_token_authenticates() {
-    let repository = Arc::new(MemoryRepository::default());
-    let app = test_app(repository.clone(), Vec::new());
-    let denied = app
-        .clone()
+pub async fn post_memo(app: &axum::Router, token: &str, body: Value) -> axum::response::Response {
+    app.clone()
         .oneshot(
-            Request::post("/v1/devices")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"name":"iPhone"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(json_response(denied).await["error"]["code"], "TRAQ_AUTH_REQUIRED");
-
-    let created = register(&app, "alice", " iPhone ").await;
-    let token = created["token"].as_str().unwrap();
-    assert!(token.starts_with("qsh_"));
-    assert_eq!(token.len(), 47);
-    assert_eq!(created["device"]["name"], "iPhone");
-    assert_eq!(repository.devices.lock().unwrap()[0].token_hash.len(), 32);
-
-    let listed = app
-        .oneshot(
-            Request::get("/v1/devices")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(listed.status(), StatusCode::OK);
-    assert_eq!(json_response(listed).await["devices"][0]["name"], "iPhone");
-}
-
-#[tokio::test]
-async fn shares_only_http_urls_and_returns_latest() {
-    let app = test_app(Arc::new(MemoryRepository::default()), Vec::new());
-    let created = register(&app, "alice", "iPhone").await;
-    let token = created["token"].as_str().unwrap();
-    let invalid = app
-        .clone()
-        .oneshot(
-            Request::post("/v1/urls")
+            Request::post("/v1/memos")
                 .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"url":"javascript:alert(1)"}"#))
+                .body(Body::from(body.to_string()))
                 .unwrap(),
         )
         .await
-        .unwrap();
-    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-
-    let shared = app
-        .clone()
-        .oneshot(
-            Request::post("/v1/urls")
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"url":"https://example.com/a?b=1#c"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(shared.status(), StatusCode::CREATED);
-    let shared = json_response(shared).await;
-    assert_eq!(shared["url"]["sourceDeviceName"], "iPhone");
-    assert_eq!(shared["url"]["expiresAt"], "2026-08-19T00:00:00.000Z");
-
-    let latest = app
-        .oneshot(
-            Request::get("/v1/urls/latest")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(latest.status(), StatusCode::OK);
-    assert_eq!(json_response(latest).await["url"]["url"], "https://example.com/a?b=1#c");
-}
-
-#[tokio::test]
-async fn cors_allows_only_configured_token_clients() {
-    let app = test_app(
-        Arc::new(MemoryRepository::default()),
-        vec!["chrome-extension://allowed".to_owned()],
-    );
-    let allowed = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("OPTIONS")
-                .uri("/v1/urls")
-                .header("origin", "chrome-extension://allowed")
-                .header("access-control-request-method", "POST")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(allowed.status(), StatusCode::NO_CONTENT);
-    assert_eq!(
-        allowed.headers()["access-control-allow-origin"],
-        "chrome-extension://allowed"
-    );
-
-    let registration = app
-        .oneshot(
-            Request::builder()
-                .method("OPTIONS")
-                .uri("/v1/devices")
-                .header("origin", "chrome-extension://allowed")
-                .header("access-control-request-method", "POST")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(registration.status(), StatusCode::FORBIDDEN);
+        .unwrap()
 }

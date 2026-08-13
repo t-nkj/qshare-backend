@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use sqlx::{MySqlPool, mysql::MySqlPoolOptions};
 
-use crate::model::{AuthenticatedDevice, Device, SharedUrl, UrlCursor};
+use crate::model::{AuthenticatedDevice, Device, SharedMemo, SharedUrl, UrlCursor};
 
 pub struct CreateDevice<'a> {
     pub id: &'a str,
@@ -20,6 +20,36 @@ pub struct CreateUrl<'a> {
     pub url: &'a str,
     pub now: NaiveDateTime,
     pub expires_at: NaiveDateTime,
+}
+
+pub struct CreateMemo {
+    pub id: String,
+    pub user_id: String,
+    pub source_device_id: String,
+    pub source_device_name: String,
+    pub content: String,
+    pub now: NaiveDateTime,
+    pub expires_at: NaiveDateTime,
+}
+
+pub struct CreateMemoBundle {
+    pub urls: Vec<CreateUrlOwned>,
+    pub memo: Option<CreateMemo>,
+}
+
+pub struct CreateUrlOwned {
+    pub id: String,
+    pub user_id: String,
+    pub source_device_id: String,
+    pub source_device_name: String,
+    pub url: String,
+    pub now: NaiveDateTime,
+    pub expires_at: NaiveDateTime,
+}
+
+pub enum CreatedMemoItem {
+    Url(SharedUrl),
+    Memo(SharedMemo),
 }
 
 #[async_trait]
@@ -44,6 +74,25 @@ pub trait Repository: Send + Sync {
     ) -> sqlx::Result<Vec<SharedUrl>>;
     async fn delete_url(&self, user_id: &str, id: &str) -> sqlx::Result<bool>;
     async fn delete_expired_urls(&self, now: NaiveDateTime) -> sqlx::Result<u64>;
+    async fn create_memo_bundle(&self, input: CreateMemoBundle) -> sqlx::Result<Vec<CreatedMemoItem>>;
+    async fn get_latest_memo(&self, user_id: &str, now: NaiveDateTime) -> sqlx::Result<Option<SharedMemo>>;
+    async fn list_memos(
+        &self,
+        user_id: &str,
+        now: NaiveDateTime,
+        limit: u32,
+        cursor: Option<&UrlCursor>,
+    ) -> sqlx::Result<Vec<SharedMemo>>;
+    async fn update_memo(
+        &self,
+        user_id: &str,
+        id: &str,
+        content: &str,
+        now: NaiveDateTime,
+        expires_at: NaiveDateTime,
+    ) -> sqlx::Result<Option<SharedMemo>>;
+    async fn delete_memo(&self, user_id: &str, id: &str) -> sqlx::Result<bool>;
+    async fn delete_expired_memos(&self, now: NaiveDateTime) -> sqlx::Result<u64>;
 }
 
 pub struct MySqlRepository {
@@ -208,6 +257,143 @@ impl Repository for MySqlRepository {
 
     async fn delete_expired_urls(&self, now: NaiveDateTime) -> sqlx::Result<u64> {
         Ok(sqlx::query("DELETE FROM shared_urls WHERE expires_at <= ?")
+            .bind(now)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
+    async fn create_memo_bundle(&self, input: CreateMemoBundle) -> sqlx::Result<Vec<CreatedMemoItem>> {
+        let mut transaction = self.pool.begin().await?;
+        let mut created = Vec::with_capacity(input.urls.len() + usize::from(input.memo.is_some()));
+
+        for url in input.urls {
+            sqlx::query(
+                "INSERT INTO shared_urls (id, user_id, source_device_id, source_device_name, url, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&url.id)
+            .bind(&url.user_id)
+            .bind(&url.source_device_id)
+            .bind(&url.source_device_name)
+            .bind(&url.url)
+            .bind(url.now)
+            .bind(url.expires_at)
+            .execute(&mut *transaction)
+            .await?;
+            let url = sqlx::query_as(
+                "SELECT id, url, source_device_id, source_device_name, created_at, expires_at FROM shared_urls WHERE id = ?",
+            )
+            .bind(&url.id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            created.push(CreatedMemoItem::Url(url));
+        }
+
+        if let Some(memo) = input.memo {
+            sqlx::query(
+                "INSERT INTO shared_memos (id, user_id, source_device_id, source_device_name, content, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&memo.id)
+            .bind(&memo.user_id)
+            .bind(&memo.source_device_id)
+            .bind(&memo.source_device_name)
+            .bind(&memo.content)
+            .bind(memo.now)
+            .bind(memo.now)
+            .bind(memo.expires_at)
+            .execute(&mut *transaction)
+            .await?;
+            let memo = sqlx::query_as(
+                "SELECT id, content, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_memos WHERE id = ?",
+            )
+            .bind(&memo.id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            created.push(CreatedMemoItem::Memo(memo));
+        }
+
+        transaction.commit().await?;
+        Ok(created)
+    }
+
+    async fn get_latest_memo(&self, user_id: &str, now: NaiveDateTime) -> sqlx::Result<Option<SharedMemo>> {
+        sqlx::query_as(
+            "SELECT id, content, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_memos WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    async fn list_memos(
+        &self,
+        user_id: &str,
+        now: NaiveDateTime,
+        limit: u32,
+        cursor: Option<&UrlCursor>,
+    ) -> sqlx::Result<Vec<SharedMemo>> {
+        let take = limit + 1;
+        if let Some(cursor) = cursor {
+            return sqlx::query_as(
+                "SELECT id, content, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_memos WHERE user_id = ? AND expires_at > ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?",
+            )
+            .bind(user_id)
+            .bind(now)
+            .bind(cursor.created_at.naive_utc())
+            .bind(cursor.created_at.naive_utc())
+            .bind(&cursor.id)
+            .bind(take)
+            .fetch_all(&self.pool)
+            .await;
+        }
+        sqlx::query_as(
+            "SELECT id, content, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_memos WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC, id DESC LIMIT ?",
+        )
+        .bind(user_id)
+        .bind(now)
+        .bind(take)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn update_memo(
+        &self,
+        user_id: &str,
+        id: &str,
+        content: &str,
+        now: NaiveDateTime,
+        expires_at: NaiveDateTime,
+    ) -> sqlx::Result<Option<SharedMemo>> {
+        sqlx::query("UPDATE shared_memos SET content = ?, updated_at = ?, expires_at = ? WHERE id = ? AND user_id = ?")
+            .bind(content)
+            .bind(now)
+            .bind(expires_at)
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query_as(
+            "SELECT id, content, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_memos WHERE id = ? AND user_id = ?",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    async fn delete_memo(&self, user_id: &str, id: &str) -> sqlx::Result<bool> {
+        Ok(sqlx::query("DELETE FROM shared_memos WHERE id = ? AND user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            > 0)
+    }
+
+    async fn delete_expired_memos(&self, now: NaiveDateTime) -> sqlx::Result<u64> {
+        Ok(sqlx::query("DELETE FROM shared_memos WHERE expires_at <= ?")
             .bind(now)
             .execute(&self.pool)
             .await?

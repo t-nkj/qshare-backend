@@ -44,10 +44,16 @@ fn spawn_cleanup(repository: Arc<MySqlRepository>) {
 }
 
 async fn cleanup_expired(repository: &dyn Repository) {
-    match repository.delete_expired_urls(Utc::now().naive_utc()).await {
-        Ok(deleted) if deleted > 0 => tracing::info!(deleted, "deleted expired URL records"),
-        Ok(_) => {}
-        Err(error) => tracing::error!(%error, "failed to delete expired URL records"),
+    let now = Utc::now().naive_utc();
+    match (
+        repository.delete_expired_urls(now).await,
+        repository.delete_expired_memos(now).await,
+    ) {
+        (Ok(urls), Ok(memos)) if urls > 0 || memos > 0 => {
+            tracing::info!(urls, memos, "deleted expired shared records")
+        }
+        (Ok(_), Ok(_)) => {}
+        (Err(error), _) | (_, Err(error)) => tracing::error!(%error, "failed to delete expired shared records"),
     }
 }
 

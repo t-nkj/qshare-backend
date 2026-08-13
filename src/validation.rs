@@ -1,5 +1,6 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -8,6 +9,7 @@ use crate::{error::ApiError, model::UrlCursor};
 
 const DEVICE_NAME_MAX_LENGTH: usize = 64;
 const URL_MAX_LENGTH: usize = 4096;
+const MEMO_CONTENT_MAX_LENGTH: usize = 10_000;
 
 pub fn device_name(body: &Value) -> Result<String, ApiError> {
     let Some(value) = body.get("name").and_then(Value::as_str) else {
@@ -42,6 +44,23 @@ pub fn http_url(body: &Value) -> Result<String, ApiError> {
             "url must not have leading or trailing whitespace",
         ));
     }
+    validate_http_url(value)?;
+    Ok(value.to_owned())
+}
+
+pub fn validate_http_url(value: &str) -> Result<(), ApiError> {
+    if value.is_empty() || value.len() > URL_MAX_LENGTH {
+        return Err(ApiError::bad_request(
+            "INVALID_URL",
+            "url must be a non-empty string of at most 4096 characters",
+        ));
+    }
+    if value.trim() != value {
+        return Err(ApiError::bad_request(
+            "INVALID_URL",
+            "url must not have leading or trailing whitespace",
+        ));
+    }
     let parsed =
         Url::parse(value).map_err(|_| ApiError::bad_request("INVALID_URL", "url must be an absolute HTTP(S) URL"))?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
@@ -50,7 +69,54 @@ pub fn http_url(body: &Value) -> Result<String, ApiError> {
             "url must be an absolute HTTP(S) URL",
         ));
     }
+    Ok(())
+}
+
+pub fn memo_content(body: &Value) -> Result<String, ApiError> {
+    let Some(value) = body.get("content").and_then(Value::as_str) else {
+        return Err(ApiError::bad_request(
+            "INVALID_MEMO_CONTENT",
+            "content must be a string",
+        ));
+    };
+    if value.trim().is_empty() || value.chars().count() > MEMO_CONTENT_MAX_LENGTH {
+        return Err(ApiError::bad_request(
+            "INVALID_MEMO_CONTENT",
+            "content must contain between 1 and 10000 characters",
+        ));
+    }
     Ok(value.to_owned())
+}
+
+pub fn auto_detect_urls(body: &Value) -> Result<bool, ApiError> {
+    match body.get("autoDetectUrls") {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(ApiError::bad_request(
+            "INVALID_AUTO_DETECT_URLS",
+            "autoDetectUrls must be a boolean",
+        )),
+    }
+}
+
+pub fn extract_http_urls(content: &str) -> Vec<String> {
+    let matcher = Regex::new(r#"(?i)https?://[^\s<>()\[\]{}\"']+"#).expect("static URL expression must be valid");
+    let mut urls = Vec::new();
+    for item in matcher.find_iter(content) {
+        let url = item
+            .as_str()
+            .trim_end_matches(['.', ',', '!', '?', ':', ';'])
+            .to_owned();
+        if validate_http_url(&url).is_ok() && !urls.contains(&url) {
+            urls.push(url);
+        }
+    }
+    urls
+}
+
+pub fn is_bare_http_url(content: &str, urls: &[String]) -> bool {
+    let trimmed = content.trim();
+    urls.len() == 1 && urls[0] == trimmed
 }
 
 pub fn limit(value: Option<&str>) -> Result<u32, ApiError> {

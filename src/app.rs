@@ -2,31 +2,21 @@ use std::{collections::HashSet, sync::Arc};
 
 use axum::{
     Json, Router,
-    body::Bytes,
-    extract::{Path, Query, State},
+    extract::State,
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::get,
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Duration, Utc};
-use rand::RngCore;
-use serde::Serialize;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 use uuid::Uuid;
 
-use crate::{
-    error::ApiError,
-    model::{AuthenticatedDevice, Device, SharedUrl},
-    repository::{CreateDevice, CreateUrl, Repository},
-    validation,
-};
+use crate::{error::ApiError, model::AuthenticatedDevice, repository::Repository};
 
 const JSON_BODY_LIMIT: usize = 16 * 1024;
-const TOKEN_PREFIX: &str = "qsh_";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -50,19 +40,21 @@ impl AppState {
         self
     }
 
-    fn now(&self) -> DateTime<Utc> {
+    pub(crate) fn now(&self) -> DateTime<Utc> {
         (self.clock)()
+    }
+
+    pub(crate) fn repository(&self) -> &Arc<dyn Repository> {
+        &self.repository
     }
 }
 
 pub fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
-        .route("/v1/devices", post(register_device).get(list_devices))
-        .route("/v1/devices/{device_id}", patch(rename_device).delete(delete_device))
-        .route("/v1/urls", post(create_url).get(list_urls))
-        .route("/v1/urls/latest", get(latest_url))
-        .route("/v1/urls/{url_id}", delete(delete_url))
+        .merge(crate::device::routes())
+        .merge(crate::url::routes())
+        .merge(crate::memo::routes())
         .fallback(not_found)
         .layer(RequestBodyLimitLayer::new(JSON_BODY_LIMIT))
         .layer(TraceLayer::new_for_http())
@@ -74,181 +66,17 @@ async fn health() -> Json<Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-async fn register_device(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<impl IntoResponse, ApiError> {
-    let user_id = forwarded_user(&headers)?;
-    let body = json_body(&headers, &body)?;
-    let name = validation::device_name(&body)?;
-    let now = state.now().naive_utc();
-    let mut random = [0_u8; 32];
-    rand::rng().fill_bytes(&mut random);
-    let token = format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(random));
-    let token_hash = Sha256::digest(token.as_bytes());
-    let id = Uuid::new_v4().to_string();
-    let device = state
-        .repository
-        .create_device(CreateDevice {
-            id: &id,
-            user_id,
-            name: &name,
-            token_hash: &token_hash,
-            now,
-        })
-        .await
-        .map_err(ApiError::internal)?;
-    Ok((StatusCode::CREATED, Json(DeviceCreated { device, token })))
-}
-
-async fn list_devices(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Devices>, ApiError> {
-    let actor = authenticate(&state, &headers).await?;
-    let devices = state
-        .repository
-        .list_devices(&actor.user_id)
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(Json(Devices { devices }))
-}
-
-async fn rename_device(
-    State(state): State<AppState>,
-    Path(device_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<DeviceEnvelope>, ApiError> {
-    let actor = authenticate(&state, &headers).await?;
-    require_uuid(&device_id, "DEVICE_NOT_FOUND", "device was not found")?;
-    let name = validation::device_name(&json_body(&headers, &body)?)?;
-    let device = state
-        .repository
-        .rename_device(&actor.user_id, &device_id, &name)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "DEVICE_NOT_FOUND", "device was not found"))?;
-    Ok(Json(DeviceEnvelope { device }))
-}
-
-async fn delete_device(
-    State(state): State<AppState>,
-    Path(device_id): Path<String>,
-    headers: HeaderMap,
-) -> Result<StatusCode, ApiError> {
-    let actor = authenticate(&state, &headers).await?;
-    require_uuid(&device_id, "DEVICE_NOT_FOUND", "device was not found")?;
-    let deleted = state
-        .repository
-        .delete_device(&actor.user_id, &device_id)
-        .await
-        .map_err(ApiError::internal)?;
-    if !deleted {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "DEVICE_NOT_FOUND",
-            "device was not found",
-        ));
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn create_url(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<impl IntoResponse, ApiError> {
-    let now = state.now();
-    let actor = authenticate_at(&state, &headers, now).await?;
-    let url = validation::http_url(&json_body(&headers, &body)?)?;
-    let id = Uuid::new_v4().to_string();
-    let shared_url = state
-        .repository
-        .create_url(CreateUrl {
-            id: &id,
-            user_id: &actor.user_id,
-            source_device_id: &actor.id,
-            source_device_name: &actor.name,
-            url: &url,
-            now: now.naive_utc(),
-            expires_at: (now + Duration::days(7)).naive_utc(),
-        })
-        .await
-        .map_err(ApiError::internal)?;
-    Ok((StatusCode::CREATED, Json(UrlEnvelope { url: shared_url })))
-}
-
-async fn latest_url(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<UrlEnvelope>, ApiError> {
-    let now = state.now();
-    let actor = authenticate_at(&state, &headers, now).await?;
-    let url = state
-        .repository
-        .get_latest_url(&actor.user_id, now.naive_utc())
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "URL_NOT_FOUND", "no unexpired URL was found"))?;
-    Ok(Json(UrlEnvelope { url }))
-}
-
 #[derive(serde::Deserialize)]
-struct ListQuery {
-    limit: Option<String>,
-    cursor: Option<String>,
+pub(crate) struct ListQuery {
+    pub(crate) limit: Option<String>,
+    pub(crate) cursor: Option<String>,
 }
 
-async fn list_urls(
-    State(state): State<AppState>,
-    Query(query): Query<ListQuery>,
-    headers: HeaderMap,
-) -> Result<Json<Urls>, ApiError> {
-    let now = state.now();
-    let actor = authenticate_at(&state, &headers, now).await?;
-    let limit = validation::limit(query.limit.as_deref())?;
-    let cursor = validation::decode_cursor(query.cursor.as_deref())?;
-    let mut urls = state
-        .repository
-        .list_urls(&actor.user_id, now.naive_utc(), limit, cursor.as_ref())
-        .await
-        .map_err(ApiError::internal)?;
-    let has_more = urls.len() > limit as usize;
-    if has_more {
-        urls.truncate(limit as usize);
-    }
-    let next_cursor = has_more
-        .then(|| {
-            urls.last()
-                .map(|url| validation::encode_cursor(&url.id, url.created_at))
-        })
-        .flatten();
-    Ok(Json(Urls { urls, next_cursor }))
-}
-
-async fn delete_url(
-    State(state): State<AppState>,
-    Path(url_id): Path<String>,
-    headers: HeaderMap,
-) -> Result<StatusCode, ApiError> {
-    let actor = authenticate(&state, &headers).await?;
-    require_uuid(&url_id, "URL_NOT_FOUND", "URL was not found")?;
-    let deleted = state
-        .repository
-        .delete_url(&actor.user_id, &url_id)
-        .await
-        .map_err(ApiError::internal)?;
-    if !deleted {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "URL_NOT_FOUND",
-            "URL was not found",
-        ));
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<AuthenticatedDevice, ApiError> {
+pub(crate) async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<AuthenticatedDevice, ApiError> {
     authenticate_at(state, headers, state.now()).await
 }
 
-async fn authenticate_at(
+pub(crate) async fn authenticate_at(
     state: &AppState,
     headers: &HeaderMap,
     now: DateTime<Utc>,
@@ -257,7 +85,7 @@ async fn authenticate_at(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|token| token.starts_with(TOKEN_PREFIX) && token.len() >= 20)
+        .filter(|token| token.starts_with("qsh_") && token.len() >= 20)
         .ok_or_else(invalid_token)?;
     let hash = Sha256::digest(authorization.as_bytes());
     state
@@ -272,27 +100,7 @@ fn invalid_token() -> ApiError {
     ApiError::unauthorized("INVALID_TOKEN", "a valid device token is required")
 }
 
-fn forwarded_user(headers: &HeaderMap) -> Result<&str, ApiError> {
-    let value = headers
-        .get("x-forwarded-user")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= 64
-                && value
-                    .bytes()
-                    .all(|character| character.is_ascii_alphanumeric() || matches!(character, b'_' | b'-'))
-        });
-    value.ok_or_else(|| {
-        ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "TRAQ_AUTH_REQUIRED",
-            "traQ authentication is required",
-        )
-    })
-}
-
-fn json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, ApiError> {
+pub(crate) fn json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, ApiError> {
     let is_json = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -315,7 +123,7 @@ fn json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, ApiError> {
     Ok(value)
 }
 
-fn require_uuid(value: &str, code: &'static str, message: &'static str) -> Result<(), ApiError> {
+pub(crate) fn require_uuid(value: &str, code: &'static str, message: &'static str) -> Result<(), ApiError> {
     let valid = Uuid::parse_str(value).is_ok_and(|id| id.get_version_num() == 4);
     if valid {
         Ok(())
@@ -415,32 +223,4 @@ fn add_cors_headers(response: &mut Response, origin: &str, preflight: bool) {
 
 async fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "NOT_FOUND", "endpoint was not found")
-}
-
-#[derive(Serialize)]
-struct DeviceCreated {
-    device: Device,
-    token: String,
-}
-
-#[derive(Serialize)]
-struct Devices {
-    devices: Vec<Device>,
-}
-
-#[derive(Serialize)]
-struct DeviceEnvelope {
-    device: Device,
-}
-
-#[derive(Serialize)]
-struct UrlEnvelope {
-    url: SharedUrl,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Urls {
-    urls: Vec<SharedUrl>,
-    next_cursor: Option<String>,
 }
