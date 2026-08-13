@@ -40,6 +40,7 @@ struct StoredMemo {
 #[derive(Clone)]
 struct StoredFile {
     user_id: String,
+    upload_id: String,
     storage_key: String,
     file: SharedFile,
 }
@@ -345,6 +346,7 @@ impl Repository for MemoryRepository {
         let mut files = self.files.lock().unwrap();
         files.push(StoredFile {
             user_id: input.user_id.clone(),
+            upload_id: input.upload_id,
             storage_key: input.storage_key,
             file: file.clone(),
         });
@@ -407,6 +409,34 @@ impl Repository for MemoryRepository {
             .filter(|item| item.user_id == user_id && item.file.expires_at > now)
             .max_by_key(|item| (item.file.updated_at, item.file.id.clone()))
             .map(|item| item.file.clone()))
+    }
+
+    async fn get_file_upload_id(&self, user_id: &str, id: &str) -> sqlx::Result<Option<String>> {
+        Ok(self
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|item| item.user_id == user_id && item.file.id == id)
+            .map(|item| item.upload_id.clone()))
+    }
+
+    async fn get_files_in_upload(
+        &self,
+        user_id: &str,
+        upload_id: &str,
+        now: NaiveDateTime,
+    ) -> sqlx::Result<Vec<SharedFile>> {
+        let mut files: Vec<_> = self
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|item| item.user_id == user_id && item.upload_id == upload_id && item.file.expires_at > now)
+            .map(|item| item.file.clone())
+            .collect();
+        files.sort_by_key(|file| (file.created_at, file.id.clone()));
+        Ok(files)
     }
 
     async fn list_files(

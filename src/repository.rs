@@ -55,6 +55,7 @@ pub enum CreatedMemoItem {
 #[derive(Clone)]
 pub struct CreateFile {
     pub id: String,
+    pub upload_id: String,
     pub user_id: String,
     pub source_device_id: String,
     pub source_device_name: String,
@@ -124,6 +125,13 @@ pub trait Repository: Send + Sync {
     async fn create_file_and_evict_once(&self, input: CreateFile, maximum_bytes: u64) -> sqlx::Result<CreatedFile>;
     async fn get_file(&self, user_id: &str, id: &str, now: NaiveDateTime) -> sqlx::Result<Option<FileRecord>>;
     async fn get_latest_file(&self, user_id: &str, now: NaiveDateTime) -> sqlx::Result<Option<SharedFile>>;
+    async fn get_file_upload_id(&self, user_id: &str, id: &str) -> sqlx::Result<Option<String>>;
+    async fn get_files_in_upload(
+        &self,
+        user_id: &str,
+        upload_id: &str,
+        now: NaiveDateTime,
+    ) -> sqlx::Result<Vec<SharedFile>>;
     async fn list_files(
         &self,
         user_id: &str,
@@ -480,8 +488,8 @@ impl Repository for MySqlRepository {
             .bind(&input.user_id)
             .fetch_one(&mut *transaction)
             .await?;
-        sqlx::query("INSERT INTO shared_files (id, user_id, source_device_id, source_device_name, name, content_type, size, storage_key, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(&input.id).bind(&input.user_id).bind(&input.source_device_id).bind(&input.source_device_name)
+        sqlx::query("INSERT INTO shared_files (id, upload_id, user_id, source_device_id, source_device_name, name, content_type, size, storage_key, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(&input.id).bind(&input.upload_id).bind(&input.user_id).bind(&input.source_device_id).bind(&input.source_device_name)
             .bind(&input.name).bind(&input.content_type).bind(input.size).bind(&input.storage_key)
             .bind(input.now).bind(input.now).bind(input.expires_at)
             .execute(&mut *transaction).await?;
@@ -521,6 +529,28 @@ impl Repository for MySqlRepository {
     async fn get_latest_file(&self, user_id: &str, now: NaiveDateTime) -> sqlx::Result<Option<SharedFile>> {
         sqlx::query_as("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE user_id = ? AND expires_at > ? ORDER BY updated_at DESC, id DESC LIMIT 1")
             .bind(user_id).bind(now).fetch_optional(&self.pool).await
+    }
+
+    async fn get_file_upload_id(&self, user_id: &str, id: &str) -> sqlx::Result<Option<String>> {
+        sqlx::query_scalar("SELECT upload_id FROM shared_files WHERE user_id = ? AND id = ?")
+            .bind(user_id)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    async fn get_files_in_upload(
+        &self,
+        user_id: &str,
+        upload_id: &str,
+        now: NaiveDateTime,
+    ) -> sqlx::Result<Vec<SharedFile>> {
+        sqlx::query_as("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE user_id = ? AND upload_id = ? AND expires_at > ? ORDER BY created_at ASC, id ASC")
+            .bind(user_id)
+            .bind(upload_id)
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
     }
 
     async fn list_files(

@@ -45,6 +45,7 @@ async fn create_files(
     let mut failed = Vec::new();
     let mut total_size = 0_u64;
     let mut index = 0_usize;
+    let upload_id = Uuid::new_v4().to_string();
 
     while let Some(mut field) = multipart.next_field().await.map_err(multipart_error)? {
         let original_name = field.file_name().map(ToOwned::to_owned);
@@ -125,6 +126,7 @@ async fn create_files(
                                 .create_file_and_evict(
                                     CreateFile {
                                         id: Uuid::new_v4().to_string(),
+                                        upload_id: upload_id.clone(),
                                         user_id: actor.user_id.clone(),
                                         source_device_id: actor.id.clone(),
                                         source_device_name: actor.name.clone(),

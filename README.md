@@ -350,10 +350,16 @@ files: <binary 2>
 | `/v1/latest/mu` | メモとURL |
 | `/v1/latest/fum` | ファイル、URL、メモ |
 
-URLは`createdAt`、メモとファイルは`updatedAt`を比較します。同時刻は`memo > url > file`の順です。成功時は`200 OK`:
+URLは`createdAt`、メモとファイルは`updatedAt`を比較します。同時刻は`memo > url > file`の順です。最新がURLまたはメモなら対応する単一オブジェクト、最新がファイルなら同じ`POST /v1/files`で作成された未期限切れのファイルを`files`配列で返します。成功時は`200 OK`:
 
 ```json
 { "type": "memo", "memo": { "id": "UUID", "content": "最新のメモ", "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." } }
+```
+
+ファイルの場合:
+
+```json
+{ "type": "file", "files": [{ "id": "UUID", "name": "photo.jpg", "contentType": "image/jpeg", "size": 12345, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." }] }
 ```
 
 該当コンテンツがない場合は`404 LATEST_NOT_FOUND`です。無効な`types`は`400 INVALID_LATEST_TYPES`です。

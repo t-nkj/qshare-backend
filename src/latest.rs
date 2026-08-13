@@ -58,19 +58,34 @@ async fn latest_for_types(state: AppState, types: LatestTypes, headers: HeaderMa
 
     let mut latest = Vec::new();
     if let Some(url) = url {
-        latest.push((url.created_at, 2_u8, Latest::Url { url }));
+        latest.push((url.created_at, 2_u8, LatestCandidate::Url { url }));
     }
     if let Some(memo) = memo {
-        latest.push((memo.updated_at, 3_u8, Latest::Memo { memo }));
+        latest.push((memo.updated_at, 3_u8, LatestCandidate::Memo { memo }));
     }
     if let Some(file) = file {
-        latest.push((file.updated_at, 1_u8, Latest::File { file }));
+        latest.push((file.updated_at, 1_u8, LatestCandidate::File { file }));
     }
     match latest
         .into_iter()
         .max_by_key(|(updated_at, priority, _)| (*updated_at, *priority))
     {
-        Some((_, _, value)) => Ok(Json(value)),
+        Some((_, _, LatestCandidate::Url { url })) => Ok(Json(Latest::Url { url })),
+        Some((_, _, LatestCandidate::Memo { memo })) => Ok(Json(Latest::Memo { memo })),
+        Some((_, _, LatestCandidate::File { file })) => {
+            let upload_id = state
+                .repository()
+                .get_file_upload_id(&actor.user_id, &file.id)
+                .await
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| ApiError::internal("latest file upload is missing"))?;
+            let files = state
+                .repository()
+                .get_files_in_upload(&actor.user_id, &upload_id, now.naive_utc())
+                .await
+                .map_err(ApiError::internal)?;
+            Ok(Json(Latest::File { files }))
+        }
         None => Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "LATEST_NOT_FOUND",
@@ -82,6 +97,12 @@ async fn latest_for_types(state: AppState, types: LatestTypes, headers: HeaderMa
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum Latest {
+    Url { url: SharedUrl },
+    Memo { memo: SharedMemo },
+    File { files: Vec<SharedFile> },
+}
+
+enum LatestCandidate {
     Url { url: SharedUrl },
     Memo { memo: SharedMemo },
     File { file: SharedFile },

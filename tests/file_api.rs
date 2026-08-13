@@ -88,7 +88,9 @@ async fn uploads_multiple_files_then_renames_downloads_and_deletes_a_file() {
         .unwrap();
     let latest = json_response(response).await;
     assert_eq!(latest["type"], "file");
-    assert_eq!(latest["file"]["id"], second_id);
+    assert_eq!(latest["files"].as_array().unwrap().len(), 2);
+    assert_eq!(latest["files"][0]["id"], id);
+    assert_eq!(latest["files"][1]["id"], second_id);
 
     let response = app
         .clone()
