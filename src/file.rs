@@ -22,11 +22,11 @@ use crate::{
 
 const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const MAX_USER_FILE_SIZE: u64 = 1024 * 1024 * 1024;
-const MULTIPART_BODY_LIMIT: usize = (MAX_FILE_SIZE as usize) + (1024 * 1024);
+const MULTIPART_BODY_LIMIT: usize = (MAX_USER_FILE_SIZE as usize) + (16 * 1024 * 1024);
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/v1/files", post(create_file).get(list_files))
+        .route("/v1/files", post(create_files).get(list_files))
         .route(
             "/v1/files/{file_id}",
             get(download_file).patch(rename_file).delete(delete_file),
@@ -34,93 +34,167 @@ pub fn routes() -> Router<AppState> {
         .layer(DefaultBodyLimit::max(MULTIPART_BODY_LIMIT))
 }
 
-async fn create_file(
+async fn create_files(
     State(state): State<AppState>,
     headers: HeaderMap,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<FileEnvelope>), ApiError> {
+) -> Result<(StatusCode, Json<FileUploadResult>), ApiError> {
     let now = state.now();
     let actor = authenticate_at(&state, &headers, now).await?;
-    let Some(mut field) = multipart.next_field().await.map_err(multipart_error)? else {
-        return Err(ApiError::bad_request("INVALID_MULTIPART", "a file field is required"));
-    };
-    if field.name() != Some("file") || field.file_name().is_none() {
-        return Err(ApiError::bad_request(
-            "INVALID_MULTIPART",
-            "a single file field is required",
-        ));
-    }
-    let name = validation::file_name(field.file_name().expect("checked file name"))?;
-    let content_type = field
-        .content_type()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let id = Uuid::new_v4().to_string();
-    let storage_key = Uuid::new_v4().to_string();
-    let temporary_path = state.file_storage_dir().join(format!(".{storage_key}.upload"));
-    let stored_path = state.file_storage_dir().join(&storage_key);
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary_path)
-        .await
-        .map_err(ApiError::internal)?;
-    let mut size = 0_u64;
-    while let Some(chunk) = field.chunk().await.map_err(multipart_error)? {
-        size += u64::try_from(chunk.len()).expect("chunk length fits in u64");
-        if size > MAX_FILE_SIZE {
-            let _ = tokio::fs::remove_file(&temporary_path).await;
-            return Err(ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "FILE_TOO_LARGE",
-                "file must not exceed 100 MiB",
-            ));
-        }
-        output.write_all(&chunk).await.map_err(ApiError::internal)?;
-    }
-    drop(field);
-    if multipart.next_field().await.map_err(multipart_error)?.is_some() {
-        let _ = tokio::fs::remove_file(&temporary_path).await;
-        return Err(ApiError::bad_request(
-            "INVALID_MULTIPART",
-            "only one file field is allowed",
-        ));
-    }
-    output.flush().await.map_err(ApiError::internal)?;
-    drop(output);
-    tokio::fs::rename(&temporary_path, &stored_path)
-        .await
-        .map_err(ApiError::internal)?;
+    let mut created = Vec::new();
+    let mut failed = Vec::new();
+    let mut total_size = 0_u64;
+    let mut index = 0_usize;
 
-    let created = state
-        .repository()
-        .create_file_and_evict(
-            CreateFile {
-                id,
-                user_id: actor.user_id,
-                source_device_id: actor.id,
-                source_device_name: actor.name,
-                name,
-                content_type,
-                size,
-                storage_key: storage_key.clone(),
-                now: now.naive_utc(),
-                expires_at: (now + Duration::days(3)).naive_utc(),
-            },
-            MAX_USER_FILE_SIZE,
-        )
-        .await;
-    let created = match created {
-        Ok(created) => created,
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&stored_path).await;
-            return Err(ApiError::internal(error));
+    while let Some(mut field) = multipart.next_field().await.map_err(multipart_error)? {
+        let original_name = field.file_name().map(ToOwned::to_owned);
+        let failure = if field.name() != Some("files") {
+            drain_field(&mut field).await?;
+            Some(UploadFailure::invalid_multipart("each part must use the files field"))
+        } else if original_name.is_none() {
+            drain_field(&mut field).await?;
+            Some(UploadFailure::invalid_multipart("a filename is required"))
+        } else if total_size >= MAX_USER_FILE_SIZE {
+            drain_field(&mut field).await?;
+            Some(UploadFailure::total_size_exceeded())
+        } else {
+            let original_name = original_name.as_deref().expect("checked above");
+            match validation::file_name(original_name) {
+                Ok(name) => {
+                    let content_type = field
+                        .content_type()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "application/octet-stream".to_owned());
+                    let storage_key = Uuid::new_v4().to_string();
+                    let temporary_path = state.file_storage_dir().join(format!(".{storage_key}.upload"));
+                    let stored_path = state.file_storage_dir().join(&storage_key);
+                    let mut output = match OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&temporary_path)
+                        .await
+                    {
+                        Ok(output) => Some(output),
+                        Err(error) => {
+                            tracing::error!(%error, "failed to create temporary shared file");
+                            None
+                        }
+                    };
+                    let mut size = 0_u64;
+                    let mut failure = output.is_none().then_some(UploadFailure::save_failed());
+
+                    while let Some(chunk) = field.chunk().await.map_err(multipart_error)? {
+                        let chunk_size = u64::try_from(chunk.len()).expect("chunk length fits in u64");
+                        size = size.saturating_add(chunk_size);
+                        total_size = total_size.saturating_add(chunk_size);
+                        if failure.is_none() && size > MAX_FILE_SIZE {
+                            failure = Some(UploadFailure::file_too_large());
+                        }
+                        if failure.is_none() && total_size > MAX_USER_FILE_SIZE {
+                            failure = Some(UploadFailure::total_size_exceeded());
+                        }
+                        if let Some(output) = output.as_mut()
+                            && failure.is_none()
+                            && let Err(error) = output.write_all(&chunk).await
+                        {
+                            tracing::error!(%error, "failed to write temporary shared file");
+                            failure = Some(UploadFailure::save_failed());
+                        }
+                    }
+                    drop(field);
+                    if let Some(failure) = failure {
+                        drop(output);
+                        let _ = tokio::fs::remove_file(&temporary_path).await;
+                        Some(failure)
+                    } else {
+                        let output = output.expect("output exists without a failure");
+                        let flush_result = output.sync_all().await;
+                        drop(output);
+                        if let Err(error) = flush_result {
+                            tracing::error!(%error, "failed to flush temporary shared file");
+                            let _ = tokio::fs::remove_file(&temporary_path).await;
+                            Some(UploadFailure::save_failed())
+                        } else if let Err(error) = tokio::fs::rename(&temporary_path, &stored_path).await {
+                            tracing::error!(%error, "failed to store shared file");
+                            let _ = tokio::fs::remove_file(&temporary_path).await;
+                            Some(UploadFailure::save_failed())
+                        } else {
+                            let file_now = state.now();
+                            match state
+                                .repository()
+                                .create_file_and_evict(
+                                    CreateFile {
+                                        id: Uuid::new_v4().to_string(),
+                                        user_id: actor.user_id.clone(),
+                                        source_device_id: actor.id.clone(),
+                                        source_device_name: actor.name.clone(),
+                                        name,
+                                        content_type,
+                                        size,
+                                        storage_key: storage_key.clone(),
+                                        now: file_now.naive_utc(),
+                                        expires_at: (file_now + Duration::days(3)).naive_utc(),
+                                    },
+                                    MAX_USER_FILE_SIZE,
+                                )
+                                .await
+                            {
+                                Ok(result) => {
+                                    for evicted in result.evicted {
+                                        let _ =
+                                            tokio::fs::remove_file(state.file_storage_dir().join(evicted.storage_key))
+                                                .await;
+                                    }
+                                    created.push(result.file);
+                                    None
+                                }
+                                Err(error) => {
+                                    tracing::error!(%error, "failed to save shared file metadata");
+                                    let _ = tokio::fs::remove_file(&stored_path).await;
+                                    Some(UploadFailure::save_failed())
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    drain_field(&mut field).await?;
+                    Some(UploadFailure::invalid_file_name())
+                }
+            }
+        };
+
+        if let Some(error) = failure {
+            failed.push(FailedFile {
+                index,
+                name: original_name,
+                error,
+            });
         }
-    };
-    for evicted in created.evicted {
-        let _ = tokio::fs::remove_file(state.file_storage_dir().join(evicted.storage_key)).await;
+        index += 1;
     }
-    Ok((StatusCode::CREATED, Json(FileEnvelope { file: created.file })))
+
+    if !created.is_empty() {
+        return Ok((StatusCode::CREATED, Json(FileUploadResult { created, failed })));
+    }
+    let first_failure = failed
+        .first()
+        .ok_or_else(|| ApiError::bad_request("INVALID_MULTIPART", "a files field is required"))?;
+    let status = if failed.iter().all(|failure| failure.error.is_size_error()) {
+        StatusCode::PAYLOAD_TOO_LARGE
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    Err(ApiError::new(
+        status,
+        first_failure.error.code,
+        first_failure.error.message,
+    ))
+}
+
+async fn drain_field(field: &mut axum::extract::multipart::Field<'_>) -> Result<(), ApiError> {
+    while field.chunk().await.map_err(multipart_error)?.is_some() {}
+    Ok(())
 }
 
 async fn list_files(
@@ -266,6 +340,66 @@ fn multipart_error(error: axum::extract::multipart::MultipartError) -> ApiError 
 #[derive(Serialize)]
 struct FileEnvelope {
     file: SharedFile,
+}
+
+#[derive(Serialize)]
+struct FileUploadResult {
+    created: Vec<SharedFile>,
+    failed: Vec<FailedFile>,
+}
+
+#[derive(Serialize)]
+struct FailedFile {
+    index: usize,
+    name: Option<String>,
+    error: UploadFailure,
+}
+
+#[derive(Serialize)]
+struct UploadFailure {
+    code: &'static str,
+    message: &'static str,
+}
+
+impl UploadFailure {
+    fn invalid_multipart(message: &'static str) -> Self {
+        Self {
+            code: "INVALID_MULTIPART",
+            message,
+        }
+    }
+
+    fn invalid_file_name() -> Self {
+        Self {
+            code: "INVALID_FILE_NAME",
+            message: "file name is invalid",
+        }
+    }
+
+    fn file_too_large() -> Self {
+        Self {
+            code: "FILE_TOO_LARGE",
+            message: "file must not exceed 100 MiB",
+        }
+    }
+
+    fn total_size_exceeded() -> Self {
+        Self {
+            code: "TOTAL_SIZE_EXCEEDED",
+            message: "total file size must not exceed 1 GiB",
+        }
+    }
+
+    fn save_failed() -> Self {
+        Self {
+            code: "FILE_SAVE_FAILED",
+            message: "file could not be saved",
+        }
+    }
+
+    fn is_size_error(&self) -> bool {
+        matches!(self.code, "FILE_TOO_LARGE" | "TOTAL_SIZE_EXCEEDED")
+    }
 }
 
 #[derive(Serialize)]

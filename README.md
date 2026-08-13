@@ -290,19 +290,29 @@ URL自動判定は実行せず、URL履歴も変更しません。成功時は`2
 
 ### `POST /v1/files`
 
-ファイルを1件アップロードします。Bearer認証と`multipart/form-data`が必要です。フィールド名は必ず`file`です。
+1件以上のファイルをアップロードします。Bearer認証と`multipart/form-data`が必要です。各ファイルのフィールド名は必ず複数形の`files`にします。同じフィールドを繰り返してください。単数形の`file`は受け付けません。
 
 ```text
-file: <binary>
+files: <binary 1>
+files: <binary 2>
 ```
 
-任意形式を受け付けます。ファイル名は1〜255文字で、制御文字・`/`・`\`は使用できません。ファイル名・MIME typeはmultipartの情報から取得します。MIME typeがなければ`application/octet-stream`です。複数フィールドや100 MiB超過は拒否します。
+任意形式を受け付けます。各ファイルは100 MiB以下、リクエスト中のファイル合計は1 GiB以下です。ファイル名は1〜255文字で、制御文字・`/`・`\`は使用できません。ファイル名・MIME typeはmultipartの情報から取得します。MIME typeがなければ`application/octet-stream`です。
 
-成功時は`201 Created`:
+ファイルごとに保存するため、失敗したファイルがあっても他のファイルは保存されます。1件以上成功した場合は`201 Created`で、入力順の`created`と失敗した項目の`failed`を返します。`index`は0始まりです。
 
 ```json
-{ "file": { "id": "UUID", "name": "document.pdf", "contentType": "application/pdf", "size": 12345, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." } }
+{
+  "created": [
+    { "id": "UUID", "name": "document.pdf", "contentType": "application/pdf", "size": 12345, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." }
+  ],
+  "failed": [
+    { "index": 1, "name": "too-large.mov", "error": { "code": "FILE_TOO_LARGE", "message": "file must not exceed 100 MiB" } }
+  ]
+}
 ```
+
+すべて失敗した場合は通常のエラー形式を返します。不正なフィールド・ファイル名は`400`、すべてが個別サイズ超過または合計サイズ超過の場合は`413`です。合計1 GiBに達した後のファイルは`TOTAL_SIZE_EXCEEDED`として`failed`に入り、それまでに保存されたファイルは残ります。
 
 ### `GET /v1/files`
 
