@@ -20,22 +20,27 @@
 | `PATCH` | `/v1/devices/{deviceId}` | Bearer | 端末名変更 |
 | `DELETE` | `/v1/devices/{deviceId}` | Bearer | 端末削除・トークン失効 |
 | `POST` | `/v1/urls` | Bearer | URL共有 |
-| `GET` | `/v1/urls/latest` | Bearer | 最新URL取得 |
+| `GET` | `/v1/latest/u` | Bearer | 最新URL取得 |
 | `GET` | `/v1/urls` | Bearer | 7日以内の履歴取得 |
 | `DELETE` | `/v1/urls/{urlId}` | Bearer | URL削除 |
 | `POST` | `/v1/memos` | Bearer | メモ追加（URL自動判定対応） |
-| `GET` | `/v1/memos/latest` | Bearer | 最新メモ取得 |
+| `GET` | `/v1/latest/m` | Bearer | 最新メモ取得 |
 | `GET` | `/v1/memos` | Bearer | 7日以内のメモ履歴取得 |
 | `PATCH` | `/v1/memos/{memoId}` | Bearer | メモ編集 |
 | `DELETE` | `/v1/memos/{memoId}` | Bearer | メモ削除 |
-| `GET` | `/v1/latest` | Bearer | URL・メモを含む最終更新コンテンツを取得 |
+| `POST` | `/v1/files` | Bearer | ファイル共有 |
+| `GET` | `/v1/files` | Bearer | 3日以内のファイル履歴取得 |
+| `GET` | `/v1/files/{fileId}` | Bearer | ファイル本体をダウンロード |
+| `PATCH` | `/v1/files/{fileId}` | Bearer | ファイル名変更 |
+| `DELETE` | `/v1/files/{fileId}` | Bearer | ファイル削除 |
+| `GET` | `/v1/latest/mu` | Bearer | URL・メモを含む最終更新コンテンツを取得 |
 | `GET` | `/healthz` | なし | ヘルスチェック |
 
 `GET /v1/urls`は`limit`（既定50、最大100）とカーソルによるページングに対応します。
 `GET /v1/memos`も同じページングに対応します。メモ本文は最大10,000文字です。
 エラーは`{"error":{"code":"...","message":"..."}}`形式です。
 
-`GET /v1/latest`は、URLの`createdAt`とメモの`updatedAt`を比較し、より新しい未期限切れの項目を返します。時刻が同じ場合はメモを返します。
+`GET /v1/latest/{types}`は、`f`（ファイル）、`u`（URL）、`m`（メモ）を重複なし・順不同で指定し、その集合から最終更新が新しい1件を返します。URLは`createdAt`、メモとファイルは`updatedAt`で比較し、同時刻はメモ、URL、ファイルの順で返します。`/v1/latest`、`/v1/urls/latest`、`/v1/memos/latest`は提供しません。
 
 ```json
 {
@@ -70,6 +75,16 @@
 
 メモは作成・編集から7日間保持されます。編集時にURL自動判定は行いません。
 
+## ファイル共有
+
+`POST /v1/files`はBearer認証付きの`multipart/form-data`で、`file`フィールド1つを送信します。任意形式を最大100 MiBまで受け付け、元のファイル名、MIME type、サイズ、送信元端末、作成・更新・期限日時を返します。
+
+ファイルは3日間保持され、名前を`PATCH /v1/files/{fileId}`の`{ "name": "..." }`で変更すると、更新時刻と期限が変更から3日後へ更新されます。未期限切れファイルの合計はユーザーごとに1 GiBで、超過時には最終更新が古いファイルから自動削除されます。
+
+ファイル本体は`GET /v1/files/{fileId}`で取得します。`Content-Disposition: attachment`を常に返すため、ブラウザ上で直接表示せずダウンロードします。
+
+NeoShowcaseのRuntimeファイルシステムを使用するため、アプリの再起動・再デプロイ時にはファイルとその履歴がすべて消えます。
+
 ## ローカル開発
 
 MariaDBを用意してから、接続情報を`.env`に保存します。
@@ -92,6 +107,7 @@ NS_MARIADB_PORT="3306"
 NS_MARIADB_USER="qshare"
 PORT=3000
 CORS_ALLOWED_ORIGINS="chrome-extension://extension-id"
+FILE_STORAGE_DIR="/tmp/qshare-files"
 RUST_LOG="qshare_backend=info,tower_http=info"
 ```
 

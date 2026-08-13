@@ -10,6 +10,22 @@ use crate::{error::ApiError, model::UrlCursor};
 const DEVICE_NAME_MAX_LENGTH: usize = 64;
 const URL_MAX_LENGTH: usize = 4096;
 const MEMO_CONTENT_MAX_LENGTH: usize = 10_000;
+const FILE_NAME_MAX_LENGTH: usize = 255;
+
+pub fn file_name(value: &str) -> Result<String, ApiError> {
+    if value.is_empty()
+        || value.chars().count() > FILE_NAME_MAX_LENGTH
+        || value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        return Err(ApiError::bad_request(
+            "INVALID_FILE_NAME",
+            "file name must contain between 1 and 255 safe characters",
+        ));
+    }
+    Ok(value.to_owned())
+}
 
 pub fn device_name(body: &Value) -> Result<String, ApiError> {
     let Some(value) = body.get("name").and_then(Value::as_str) else {
