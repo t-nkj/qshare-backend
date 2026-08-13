@@ -12,7 +12,8 @@ use qshare_backend::{
     app::{AppState, create_app},
     model::{AuthenticatedDevice, Device, SharedFile, SharedMemo, SharedUrl, UrlCursor},
     repository::{
-        CreateDevice, CreateFile, CreateMemoBundle, CreateUrl, CreatedFile, CreatedMemoItem, FileRecord, Repository,
+        CreateDevice, CreateFile, CreateMemoBundle, CreateUrl, CreatedFile, CreatedMemoItem, FileRecord, FileThumbnail,
+        Repository,
     },
 };
 use serde_json::{Value, json};
@@ -42,6 +43,7 @@ struct StoredFile {
     user_id: String,
     upload_id: String,
     storage_key: String,
+    thumbnail: Option<Vec<u8>>,
     file: SharedFile,
 }
 
@@ -337,6 +339,7 @@ impl Repository for MemoryRepository {
             name: input.name,
             content_type: input.content_type,
             size: input.size,
+            has_thumbnail: input.thumbnail.is_some(),
             source_device_id: Some(input.source_device_id),
             source_device_name: input.source_device_name,
             created_at: input.now,
@@ -348,6 +351,7 @@ impl Repository for MemoryRepository {
             user_id: input.user_id.clone(),
             upload_id: input.upload_id,
             storage_key: input.storage_key,
+            thumbnail: input.thumbnail,
             file: file.clone(),
         });
         let mut indexes: Vec<_> = files
@@ -397,6 +401,25 @@ impl Repository for MemoryRepository {
             .map(|item| FileRecord {
                 file: item.file.clone(),
                 storage_key: item.storage_key.clone(),
+            }))
+    }
+
+    async fn get_file_thumbnail(
+        &self,
+        user_id: &str,
+        id: &str,
+        now: NaiveDateTime,
+    ) -> sqlx::Result<Option<FileThumbnail>> {
+        Ok(self
+            .files
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|item| item.user_id == user_id && item.file.id == id && item.file.expires_at > now)
+            .and_then(|item| item.thumbnail.clone())
+            .map(|data| FileThumbnail {
+                content_type: "image/webp".to_owned(),
+                data,
             }))
     }
 

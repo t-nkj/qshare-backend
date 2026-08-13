@@ -63,6 +63,7 @@ pub struct CreateFile {
     pub content_type: String,
     pub size: u64,
     pub storage_key: String,
+    pub thumbnail: Option<Vec<u8>>,
     pub now: NaiveDateTime,
     pub expires_at: NaiveDateTime,
 }
@@ -76,6 +77,11 @@ pub struct FileRecord {
 pub struct CreatedFile {
     pub file: SharedFile,
     pub evicted: Vec<FileRecord>,
+}
+
+pub struct FileThumbnail {
+    pub content_type: String,
+    pub data: Vec<u8>,
 }
 
 #[async_trait]
@@ -124,6 +130,12 @@ pub trait Repository: Send + Sync {
     }
     async fn create_file_and_evict_once(&self, input: CreateFile, maximum_bytes: u64) -> sqlx::Result<CreatedFile>;
     async fn get_file(&self, user_id: &str, id: &str, now: NaiveDateTime) -> sqlx::Result<Option<FileRecord>>;
+    async fn get_file_thumbnail(
+        &self,
+        user_id: &str,
+        id: &str,
+        now: NaiveDateTime,
+    ) -> sqlx::Result<Option<FileThumbnail>>;
     async fn get_latest_file(&self, user_id: &str, now: NaiveDateTime) -> sqlx::Result<Option<SharedFile>>;
     async fn get_file_upload_id(&self, user_id: &str, id: &str) -> sqlx::Result<Option<String>>;
     async fn get_files_in_upload(
@@ -488,12 +500,13 @@ impl Repository for MySqlRepository {
             .bind(&input.user_id)
             .fetch_one(&mut *transaction)
             .await?;
-        sqlx::query("INSERT INTO shared_files (id, upload_id, user_id, source_device_id, source_device_name, name, content_type, size, storage_key, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO shared_files (id, upload_id, user_id, source_device_id, source_device_name, name, content_type, size, storage_key, thumbnail_content_type, thumbnail_data, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(&input.id).bind(&input.upload_id).bind(&input.user_id).bind(&input.source_device_id).bind(&input.source_device_name)
             .bind(&input.name).bind(&input.content_type).bind(input.size).bind(&input.storage_key)
+            .bind(input.thumbnail.as_ref().map(|_| "image/webp")).bind(&input.thumbnail)
             .bind(input.now).bind(input.now).bind(input.expires_at)
             .execute(&mut *transaction).await?;
-        let records: Vec<FileRecord> = sqlx::query_as::<_, FileRow>("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at, storage_key FROM shared_files WHERE user_id = ? AND expires_at > ? ORDER BY updated_at, (id = ?) ASC, id")
+        let records: Vec<FileRecord> = sqlx::query_as::<_, FileRow>("SELECT id, name, content_type, size, thumbnail_data IS NOT NULL AS has_thumbnail, source_device_id, source_device_name, created_at, updated_at, expires_at, storage_key FROM shared_files WHERE user_id = ? AND expires_at > ? ORDER BY updated_at, (id = ?) ASC, id")
             .bind(&input.user_id).bind(input.now).bind(&input.id).fetch_all(&mut *transaction).await?
             .into_iter().map(FileRecord::from).collect();
         let mut total: u64 = records.iter().map(|record| record.file.size).sum();
@@ -514,20 +527,41 @@ impl Repository for MySqlRepository {
             .bind(&input.user_id)
             .execute(&mut *transaction)
             .await?;
-        let file: SharedFile = sqlx::query_as("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE id = ?")
+        let file: SharedFile = sqlx::query_as("SELECT id, name, content_type, size, thumbnail_data IS NOT NULL AS has_thumbnail, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE id = ?")
             .bind(&input.id).fetch_one(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(CreatedFile { file, evicted })
     }
 
     async fn get_file(&self, user_id: &str, id: &str, now: NaiveDateTime) -> sqlx::Result<Option<FileRecord>> {
-        let row = sqlx::query_as::<_, FileRow>("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at, storage_key FROM shared_files WHERE user_id = ? AND id = ? AND expires_at > ?")
+        let row = sqlx::query_as::<_, FileRow>("SELECT id, name, content_type, size, thumbnail_data IS NOT NULL AS has_thumbnail, source_device_id, source_device_name, created_at, updated_at, expires_at, storage_key FROM shared_files WHERE user_id = ? AND id = ? AND expires_at > ?")
             .bind(user_id).bind(id).bind(now).fetch_optional(&self.pool).await?;
         Ok(row.map(FileRecord::from))
     }
 
+    async fn get_file_thumbnail(
+        &self,
+        user_id: &str,
+        id: &str,
+        now: NaiveDateTime,
+    ) -> sqlx::Result<Option<FileThumbnail>> {
+        #[derive(sqlx::FromRow)]
+        struct ThumbnailRow {
+            content_type: String,
+            data: Vec<u8>,
+        }
+
+        sqlx::query_as::<_, ThumbnailRow>("SELECT thumbnail_content_type AS content_type, thumbnail_data AS data FROM shared_files WHERE user_id = ? AND id = ? AND expires_at > ? AND thumbnail_data IS NOT NULL")
+            .bind(user_id)
+            .bind(id)
+            .bind(now)
+            .fetch_optional(&self.pool)
+            .await
+            .map(|row| row.map(|row| FileThumbnail { content_type: row.content_type, data: row.data }))
+    }
+
     async fn get_latest_file(&self, user_id: &str, now: NaiveDateTime) -> sqlx::Result<Option<SharedFile>> {
-        sqlx::query_as("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE user_id = ? AND expires_at > ? ORDER BY updated_at DESC, id DESC LIMIT 1")
+        sqlx::query_as("SELECT id, name, content_type, size, thumbnail_data IS NOT NULL AS has_thumbnail, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE user_id = ? AND expires_at > ? ORDER BY updated_at DESC, id DESC LIMIT 1")
             .bind(user_id).bind(now).fetch_optional(&self.pool).await
     }
 
@@ -545,7 +579,7 @@ impl Repository for MySqlRepository {
         upload_id: &str,
         now: NaiveDateTime,
     ) -> sqlx::Result<Vec<SharedFile>> {
-        sqlx::query_as("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE user_id = ? AND upload_id = ? AND expires_at > ? ORDER BY created_at ASC, id ASC")
+        sqlx::query_as("SELECT id, name, content_type, size, thumbnail_data IS NOT NULL AS has_thumbnail, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE user_id = ? AND upload_id = ? AND expires_at > ? ORDER BY created_at ASC, id ASC")
             .bind(user_id)
             .bind(upload_id)
             .bind(now)
@@ -562,10 +596,10 @@ impl Repository for MySqlRepository {
     ) -> sqlx::Result<Vec<SharedFile>> {
         let take = limit + 1;
         if let Some(cursor) = cursor {
-            return sqlx::query_as("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE user_id = ? AND expires_at > ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?")
+            return sqlx::query_as("SELECT id, name, content_type, size, thumbnail_data IS NOT NULL AS has_thumbnail, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE user_id = ? AND expires_at > ? AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?")
                 .bind(user_id).bind(now).bind(cursor.created_at.naive_utc()).bind(cursor.created_at.naive_utc()).bind(&cursor.id).bind(take).fetch_all(&self.pool).await;
         }
-        sqlx::query_as("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC, id DESC LIMIT ?")
+        sqlx::query_as("SELECT id, name, content_type, size, thumbnail_data IS NOT NULL AS has_thumbnail, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC, id DESC LIMIT ?")
             .bind(user_id).bind(now).bind(take).fetch_all(&self.pool).await
     }
 
@@ -586,7 +620,7 @@ impl Repository for MySqlRepository {
             .bind(user_id)
             .execute(&self.pool)
             .await?;
-        sqlx::query_as("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE id = ? AND user_id = ?")
+        sqlx::query_as("SELECT id, name, content_type, size, thumbnail_data IS NOT NULL AS has_thumbnail, source_device_id, source_device_name, created_at, updated_at, expires_at FROM shared_files WHERE id = ? AND user_id = ?")
             .bind(id).bind(user_id).fetch_optional(&self.pool).await
     }
 
@@ -597,7 +631,7 @@ impl Repository for MySqlRepository {
             .bind(user_id)
             .fetch_optional(&mut *transaction)
             .await?;
-        let row = sqlx::query_as::<_, FileRow>("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at, storage_key FROM shared_files WHERE id = ? AND user_id = ? FOR UPDATE")
+        let row = sqlx::query_as::<_, FileRow>("SELECT id, name, content_type, size, thumbnail_data IS NOT NULL AS has_thumbnail, source_device_id, source_device_name, created_at, updated_at, expires_at, storage_key FROM shared_files WHERE id = ? AND user_id = ? FOR UPDATE")
             .bind(id).bind(user_id).fetch_optional(&mut *transaction).await?;
         let Some(row) = row else {
             return Ok(None);
@@ -618,7 +652,7 @@ impl Repository for MySqlRepository {
 
     async fn delete_expired_files(&self, now: NaiveDateTime) -> sqlx::Result<Vec<FileRecord>> {
         let _guard = self.file_write_lock.lock().await;
-        let records: Vec<FileRecord> = sqlx::query_as::<_, FileRow>("SELECT id, name, content_type, size, source_device_id, source_device_name, created_at, updated_at, expires_at, storage_key FROM shared_files WHERE expires_at <= ?")
+        let records: Vec<FileRecord> = sqlx::query_as::<_, FileRow>("SELECT id, name, content_type, size, thumbnail_data IS NOT NULL AS has_thumbnail, source_device_id, source_device_name, created_at, updated_at, expires_at, storage_key FROM shared_files WHERE expires_at <= ?")
             .bind(now).fetch_all(&self.pool).await?.into_iter().map(FileRecord::from).collect();
         sqlx::query("DELETE FROM shared_files WHERE expires_at <= ?")
             .bind(now)
@@ -641,6 +675,7 @@ struct FileRow {
     name: String,
     content_type: String,
     size: u64,
+    has_thumbnail: bool,
     source_device_id: Option<String>,
     source_device_name: String,
     created_at: NaiveDateTime,
@@ -658,6 +693,7 @@ impl From<FileRow> for FileRecord {
                 name: row.name,
                 content_type: row.content_type,
                 size: row.size,
+                has_thumbnail: row.has_thumbnail,
                 source_device_id: row.source_device_id,
                 source_device_name: row.source_device_name,
                 created_at: row.created_at,

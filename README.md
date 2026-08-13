@@ -158,6 +158,7 @@ URLは作成から7日間保持されます。
   "name": "document.pdf",
   "contentType": "application/pdf",
   "size": 12345,
+  "hasThumbnail": false,
   "sourceDeviceId": "UUID",
   "sourceDeviceName": "iPhone",
   "createdAt": "...",
@@ -304,7 +305,7 @@ files: <binary 2>
 ```json
 {
   "created": [
-    { "id": "UUID", "name": "document.pdf", "contentType": "application/pdf", "size": 12345, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." }
+    { "id": "UUID", "name": "document.pdf", "contentType": "application/pdf", "size": 12345, "hasThumbnail": false, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." }
   ],
   "failed": [
     { "index": 1, "name": "too-large.mov", "error": { "code": "FILE_TOO_LARGE", "message": "file must not exceed 100 MiB" } }
@@ -316,15 +317,19 @@ files: <binary 2>
 
 ### `GET /v1/files`
 
-3日以内のファイルメタデータを新しい順で返します。本体は含みません。`200 OK`:
+3日以内のファイルメタデータを新しい順で返します。本体は含みません。画像アップロード時に生成されたサムネイルの有無は`hasThumbnail`で確認できます。`200 OK`:
 
 ```json
-{ "files": [{ "id": "UUID", "name": "document.pdf", "contentType": "application/pdf", "size": 12345, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." }], "nextCursor": null }
+{ "files": [{ "id": "UUID", "name": "document.pdf", "contentType": "application/pdf", "size": 12345, "hasThumbnail": false, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." }], "nextCursor": null }
 ```
 
 ### `GET /v1/files/{fileId}`
 
 ファイル本体をダウンロードします。`200 OK`で元のMIME type、サイズ、`Content-Disposition: attachment`を返します。存在しない・他人のファイルは`404 FILE_NOT_FOUND`、Runtime再起動などで本体だけ失われた場合は`404 FILE_CONTENT_NOT_FOUND`です。
+
+### `GET /v1/files/{fileId}/thumbnail`
+
+画像ファイルのサムネイルを`image/webp`で返します。`hasThumbnail`が`true`のときだけ利用できます。サムネイルは長辺512px・最大512 KiBで、生成に失敗した場合でも元ファイルは保存されます。対象が存在しない・他人のファイル・サムネイルがない場合は`404 THUMBNAIL_NOT_AVAILABLE`です。
 
 ### `PATCH /v1/files/{fileId}`
 
@@ -359,7 +364,7 @@ URLは`createdAt`、メモとファイルは`updatedAt`を比較します。同�
 ファイルの場合:
 
 ```json
-{ "type": "file", "files": [{ "id": "UUID", "name": "photo.jpg", "contentType": "image/jpeg", "size": 12345, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." }] }
+{ "type": "file", "files": [{ "id": "UUID", "name": "photo.jpg", "contentType": "image/jpeg", "size": 12345, "hasThumbnail": true, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." }] }
 ```
 
 該当コンテンツがない場合は`404 LATEST_NOT_FOUND`です。無効な`types`は`400 INVALID_LATEST_TYPES`です。

@@ -7,6 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Duration;
+use image::ImageReader;
 use serde::Serialize;
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
@@ -23,6 +24,10 @@ use crate::{
 const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 const MAX_USER_FILE_SIZE: u64 = 1024 * 1024 * 1024;
 const MULTIPART_BODY_LIMIT: usize = (MAX_USER_FILE_SIZE as usize) + (16 * 1024 * 1024);
+const THUMBNAIL_MAX_DIMENSION: u32 = 512;
+const THUMBNAIL_MAX_SIZE: usize = 512 * 1024;
+const THUMBNAIL_DIMENSIONS: [u32; 5] = [512, 384, 256, 192, 128];
+const THUMBNAIL_QUALITIES: [f32; 5] = [85.0, 75.0, 65.0, 50.0, 35.0];
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -31,6 +36,7 @@ pub fn routes() -> Router<AppState> {
             "/v1/files/{file_id}",
             get(download_file).patch(rename_file).delete(delete_file),
         )
+        .route("/v1/files/{file_id}/thumbnail", get(download_thumbnail))
         .layer(DefaultBodyLimit::max(MULTIPART_BODY_LIMIT))
 }
 
@@ -121,6 +127,7 @@ async fn create_files(
                             Some(UploadFailure::save_failed())
                         } else {
                             let file_now = state.now();
+                            let thumbnail = create_thumbnail(&state, &stored_path, &content_type).await;
                             match state
                                 .repository()
                                 .create_file_and_evict(
@@ -134,6 +141,7 @@ async fn create_files(
                                         content_type,
                                         size,
                                         storage_key: storage_key.clone(),
+                                        thumbnail,
                                         now: file_now.naive_utc(),
                                         expires_at: (file_now + Duration::days(3)).naive_utc(),
                                     },
@@ -275,6 +283,82 @@ async fn download_file(
         HeaderValue::from_str(&disposition).expect("encoded disposition is valid"),
     );
     Ok(response)
+}
+
+async fn download_thumbnail(
+    State(state): State<AppState>,
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let now = state.now();
+    let actor = authenticate_at(&state, &headers, now).await?;
+    require_uuid(&file_id, "FILE_NOT_FOUND", "file was not found")?;
+    let thumbnail = state
+        .repository()
+        .get_file_thumbnail(&actor.user_id, &file_id, now.naive_utc())
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "THUMBNAIL_NOT_AVAILABLE",
+                "thumbnail is not available",
+            )
+        })?;
+    let mut response = Response::new(Body::from(thumbnail.data));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&thumbnail.content_type).expect("stored thumbnail content type is valid"),
+    );
+    Ok(response)
+}
+
+async fn create_thumbnail(state: &AppState, path: &std::path::Path, content_type: &str) -> Option<Vec<u8>> {
+    if !content_type.to_ascii_lowercase().starts_with("image/") {
+        return None;
+    }
+    let _permit = state.acquire_thumbnail_generation().await;
+    let path = path.to_owned();
+    let image_path = path.clone();
+    match tokio::task::spawn_blocking(move || encode_thumbnail(&image_path)).await {
+        Ok(Ok(thumbnail)) => Some(thumbnail),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, path = %path.display(), "failed to create image thumbnail");
+            None
+        }
+        Err(error) => {
+            tracing::error!(%error, "image thumbnail task failed");
+            None
+        }
+    }
+}
+
+fn encode_thumbnail(path: &std::path::Path) -> Result<Vec<u8>, image::ImageError> {
+    let mut reader = ImageReader::open(path)?.with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8_192);
+    limits.max_image_height = Some(8_192);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let source = reader.decode()?;
+    for dimension in THUMBNAIL_DIMENSIONS {
+        let image = source
+            .thumbnail(
+                dimension.min(THUMBNAIL_MAX_DIMENSION),
+                dimension.min(THUMBNAIL_MAX_DIMENSION),
+            )
+            .to_rgba8();
+        let encoder = webp::Encoder::from_rgba(image.as_raw(), image.width(), image.height());
+        for quality in THUMBNAIL_QUALITIES {
+            let thumbnail = encoder.encode(quality).to_vec();
+            if thumbnail.len() <= THUMBNAIL_MAX_SIZE {
+                return Ok(thumbnail);
+            }
+        }
+    }
+    Err(image::ImageError::Limits(image::error::LimitError::from_kind(
+        image::error::LimitErrorKind::InsufficientMemory,
+    )))
 }
 
 async fn rename_file(

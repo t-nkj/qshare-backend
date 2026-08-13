@@ -56,6 +56,7 @@ pub struct SharedFile {
     pub name: String,
     pub content_type: String,
     pub size: u64,
+    pub has_thumbnail: bool,
     pub source_device_id: Option<String>,
     pub source_device_name: String,
     #[serde(serialize_with = "serialize_datetime")]

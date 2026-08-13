@@ -15,6 +15,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -28,6 +29,7 @@ pub struct AppState {
     allowed_origins: Arc<HashSet<String>>,
     clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     file_storage_dir: Arc<PathBuf>,
+    thumbnail_generation: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -37,6 +39,7 @@ impl AppState {
             allowed_origins: Arc::new(cors_allowed_origins.into_iter().collect()),
             clock: Arc::new(Utc::now),
             file_storage_dir: Arc::new(PathBuf::from("/tmp/qshare-files")),
+            thumbnail_generation: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -61,6 +64,14 @@ impl AppState {
 
     pub(crate) fn file_storage_dir(&self) -> &Path {
         self.file_storage_dir.as_ref()
+    }
+
+    pub(crate) async fn acquire_thumbnail_generation(&self) -> OwnedSemaphorePermit {
+        self.thumbnail_generation
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("thumbnail generation semaphore is never closed")
     }
 }
 
