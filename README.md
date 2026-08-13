@@ -1,103 +1,22 @@
 # QShare backend
 
-同じtraQ IDに属する複数端末でHTTP(S) URLを共有する、Rust製のJSON APIです。
-端末登録時だけNeoShowcaseの`X-Forwarded-User`を使い、以後は端末ごとのBearerトークンで認証します。
-登録画面などのクライアントUIは含みません。
+同じtraQ IDで使う複数端末の間で、URL・メモ・ファイルを共有するRust製APIです。登録画面などのクライアントUIは含みません。
 
-## 技術構成
+## 環境構築
 
-- Rust stable（現在の最小対応バージョンは1.97）
-- Axum / Tokio
-- MariaDB / SQLx
-- rustfmt / Clippy
+### 必要なもの
 
-## API
+- Rust stable（最小対応: 1.97）
+- MariaDB
 
-| Method | Path | Authentication | Description |
-| --- | --- | --- | --- |
-| `POST` | `/v1/devices` | `X-Forwarded-User` | 端末登録・トークン発行 |
-| `GET` | `/v1/devices` | Bearer | 所有端末一覧 |
-| `PATCH` | `/v1/devices/{deviceId}` | Bearer | 端末名変更 |
-| `DELETE` | `/v1/devices/{deviceId}` | Bearer | 端末削除・トークン失効 |
-| `POST` | `/v1/urls` | Bearer | URL共有 |
-| `GET` | `/v1/latest/u` | Bearer | 最新URL取得 |
-| `GET` | `/v1/urls` | Bearer | 7日以内の履歴取得 |
-| `DELETE` | `/v1/urls/{urlId}` | Bearer | URL削除 |
-| `POST` | `/v1/memos` | Bearer | メモ追加（URL自動判定対応） |
-| `GET` | `/v1/latest/m` | Bearer | 最新メモ取得 |
-| `GET` | `/v1/memos` | Bearer | 7日以内のメモ履歴取得 |
-| `PATCH` | `/v1/memos/{memoId}` | Bearer | メモ編集 |
-| `DELETE` | `/v1/memos/{memoId}` | Bearer | メモ削除 |
-| `POST` | `/v1/files` | Bearer | ファイル共有 |
-| `GET` | `/v1/files` | Bearer | 3日以内のファイル履歴取得 |
-| `GET` | `/v1/files/{fileId}` | Bearer | ファイル本体をダウンロード |
-| `PATCH` | `/v1/files/{fileId}` | Bearer | ファイル名変更 |
-| `DELETE` | `/v1/files/{fileId}` | Bearer | ファイル削除 |
-| `GET` | `/v1/latest/mu` | Bearer | URL・メモを含む最終更新コンテンツを取得 |
-| `GET` | `/healthz` | なし | ヘルスチェック |
-
-`GET /v1/urls`は`limit`（既定50、最大100）とカーソルによるページングに対応します。
-`GET /v1/memos`も同じページングに対応します。メモ本文は最大10,000文字です。
-エラーは`{"error":{"code":"...","message":"..."}}`形式です。
-
-`GET /v1/latest/{types}`は、`f`（ファイル）、`u`（URL）、`m`（メモ）を重複なし・順不同で指定し、その集合から最終更新が新しい1件を返します。URLは`createdAt`、メモとファイルは`updatedAt`で比較し、同時刻はメモ、URL、ファイルの順で返します。`/v1/latest`、`/v1/urls/latest`、`/v1/memos/latest`は提供しません。
-
-```json
-{
-  "type": "memo",
-  "memo": { "id": "...", "content": "最新のメモ" }
-}
-```
-
-## メモのURL自動判定
-
-`POST /v1/memos`は次の形式です。
-
-```json
-{
-  "content": "確認して https://example.com/ と [資料](https://example.org/)",
-  "autoDetectUrls": true
-}
-```
-
-`autoDetectUrls`は省略時`false`です。`true`の場合、HTTP(S)の裸URLとMarkdownリンク先を出現順にURL履歴へ追加してから、元の本文のままメモを追加します。同一URLは1リクエスト中に1件だけ追加されます。
-
-本文が前後の空白を除いて裸のHTTP(S) URLだけなら、メモは作らずURLだけを追加します。応答は常に作成順の`created`配列です。
-
-```json
-{
-  "created": [
-    { "type": "url", "url": { "id": "...", "url": "https://example.com/" } },
-    { "type": "memo", "memo": { "id": "...", "content": "確認して https://example.com/" } }
-  ]
-}
-```
-
-メモは作成・編集から7日間保持されます。編集時にURL自動判定は行いません。
-
-## ファイル共有
-
-`POST /v1/files`はBearer認証付きの`multipart/form-data`で、`file`フィールド1つを送信します。任意形式を最大100 MiBまで受け付け、元のファイル名、MIME type、サイズ、送信元端末、作成・更新・期限日時を返します。
-
-ファイルは3日間保持され、名前を`PATCH /v1/files/{fileId}`の`{ "name": "..." }`で変更すると、更新時刻と期限が変更から3日後へ更新されます。未期限切れファイルの合計はユーザーごとに1 GiBで、超過時には最終更新が古いファイルから自動削除されます。
-
-ファイル本体は`GET /v1/files/{fileId}`で取得します。`Content-Disposition: attachment`を常に返すため、ブラウザ上で直接表示せずダウンロードします。
-
-NeoShowcaseのRuntimeファイルシステムを使用するため、アプリの再起動・再デプロイ時にはファイルとその履歴がすべて消えます。
-
-## ローカル開発
-
-MariaDBを用意してから、接続情報を`.env`に保存します。
+### ローカル起動
 
 ```sh
 cp .env.example .env
 cargo run
 ```
 
-起動時にSQLxのマイグレーションが自動適用されます。既存のPrisma版が作成した
-`devices`と`shared_urls`も同じスキーマのまま利用できます。
-
-`.env`の例:
+起動時にSQLxマイグレーションが自動適用されます。MariaDB接続情報は`.env`へ設定してください。
 
 ```dotenv
 NS_MARIADB_DATABASE="qshare"
@@ -105,42 +24,334 @@ NS_MARIADB_HOSTNAME="127.0.0.1"
 NS_MARIADB_PASSWORD="secret"
 NS_MARIADB_PORT="3306"
 NS_MARIADB_USER="qshare"
+
 PORT=3000
 CORS_ALLOWED_ORIGINS="chrome-extension://extension-id"
 FILE_STORAGE_DIR="/tmp/qshare-files"
 RUST_LOG="qshare_backend=info,tower_http=info"
 ```
 
-接続URLはアプリ側で安全に組み立てるため、パスワードなどのURLエンコードは不要です。
+`NS_MARIADB_*`から接続URLを生成するため、`DATABASE_URL`は不要です。パスワードのURLエンコードも不要です。
 
-## NeoShowcase
+| 変数 | 必須 | 内容 |
+| --- | --- | --- |
+| `NS_MARIADB_DATABASE` | はい | MariaDBデータベース名 |
+| `NS_MARIADB_HOSTNAME` | はい | MariaDBホスト名 |
+| `NS_MARIADB_PASSWORD` | はい | MariaDBパスワード |
+| `NS_MARIADB_PORT` | はい | MariaDBポート |
+| `NS_MARIADB_USER` | はい | MariaDBユーザー名 |
+| `PORT` | いいえ | HTTP待受ポート。既定値は`3000` |
+| `HOST` | いいえ | HTTP待受ホスト。既定値は`0.0.0.0` |
+| `CORS_ALLOWED_ORIGINS` | いいえ | 許可するOriginをカンマ区切りで指定 |
+| `FILE_STORAGE_DIR` | いいえ | ファイル本体の保存先。既定値は`/tmp/qshare-files` |
+| `RUST_LOG` | いいえ | ログレベル |
 
-NeoShowcaseの標準Runtime BuildpackはRust/Cargoを含まないため、`Runtime Command`を使います。
+### NeoShowcaseへのデプロイ
 
 - Build設定: `Runtime Command`
 - Base Image: `rust:latest`
+- Context: `backend`
 - Build Command: `cargo build --release --locked`
 - Entrypoint: `./target/release/qshare-backend`
 - Command: 空欄
-- HTTP Port: アプリ環境変数`PORT`と同じ値
+- HTTP Port: `PORT`と同じ値
 - Use MariaDB: 有効
 - 部員認証: `Soft`
 - 公開URL: `https://qshare.trap.show/api`
 - Strip Path Prefix: 有効
 
-ローカル・NeoShowcaseともに、以下の環境変数からMariaDB接続URLを自動生成します。
+NeoShowcaseではMariaDBの自動設定済み`NS_MARIADB_*`を利用します。ファイルはRuntimeコンテナのローカルファイルシステムへ保存するため、**再起動・再デプロイ時にファイル本体とその履歴はすべて削除されます**。
 
-- `NS_MARIADB_DATABASE`
-- `NS_MARIADB_HOSTNAME`
-- `NS_MARIADB_PASSWORD`
-- `NS_MARIADB_PORT`
-- `NS_MARIADB_USER`
-
-## 品質確認
+### 品質確認
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo build --release --locked
+```
+
+## API共通仕様
+
+本番のベースURLは`https://qshare.trap.show/api`です。以降の`/v1/...`はこのベースURLからのパスです。
+
+JSONを送るエンドポイントは`Content-Type: application/json`を指定します。端末登録以外は次の認証ヘッダーが必要です。
+
+```http
+Authorization: Bearer qsh_...
+```
+
+日時はUTCのRFC 3339形式（ミリ秒付き）で返ります。
+
+```json
+"2026-08-13T00:00:00.000Z"
+```
+
+エラーはすべて次の形式です。
+
+```json
+{
+  "error": {
+    "code": "INVALID_TOKEN",
+    "message": "a valid device token is required"
+  }
+}
+```
+
+`GET /v1/urls`、`GET /v1/memos`、`GET /v1/files`は共通してカーソルページングに対応します。
+
+| クエリ | 内容 |
+| --- | --- |
+| `limit` | 1〜100。省略時は50 |
+| `cursor` | 前ページの`nextCursor`。次ページがない場合は`null` |
+
+## データ形式
+
+### Device
+
+```json
+{
+  "id": "UUID",
+  "name": "iPhone",
+  "createdAt": "...",
+  "updatedAt": "...",
+  "lastUsedAt": "..."
+}
+```
+
+### URL
+
+```json
+{
+  "id": "UUID",
+  "url": "https://example.com/",
+  "sourceDeviceId": "UUID",
+  "sourceDeviceName": "iPhone",
+  "createdAt": "...",
+  "expiresAt": "..."
+}
+```
+
+URLは作成から7日間保持されます。
+
+### Memo
+
+```json
+{
+  "id": "UUID",
+  "content": "メモ本文",
+  "sourceDeviceId": "UUID",
+  "sourceDeviceName": "iPhone",
+  "createdAt": "...",
+  "updatedAt": "...",
+  "expiresAt": "..."
+}
+```
+
+メモは作成・編集から7日間保持されます。本文は空白のみを除き、最大10,000文字です。
+
+### File
+
+```json
+{
+  "id": "UUID",
+  "name": "document.pdf",
+  "contentType": "application/pdf",
+  "size": 12345,
+  "sourceDeviceId": "UUID",
+  "sourceDeviceName": "iPhone",
+  "createdAt": "...",
+  "updatedAt": "...",
+  "expiresAt": "..."
+}
+```
+
+ファイルは作成・名前変更から3日間保持されます。ファイル1件は100 MiBまで、未期限切れの合計はユーザーごとに1 GiBまでです。超過時は更新日時が古いファイルから自動削除されます。
+
+## エンドポイント
+
+### `POST /v1/devices`
+
+NeoShowcase経由で端末を登録します。`X-Forwarded-User`が必要で、通常のBearer認証は不要です。
+
+```http
+X-Forwarded-User: traq-id
+```
+
+```json
+{ "name": "iPhone" }
+```
+
+端末名は1〜64文字です。成功時は`201 Created`を返します。`token`はこの応答でのみ返るため、クライアント側で安全に保存してください。
+
+```json
+{
+  "device": { "id": "UUID", "name": "iPhone", "createdAt": "...", "updatedAt": "...", "lastUsedAt": null },
+  "token": "qsh_..."
+}
+```
+
+### `GET /v1/devices`
+
+登録済みの自分の端末を返します。`200 OK`:
+
+```json
+{ "devices": [{ "id": "UUID", "name": "iPhone", "createdAt": "...", "updatedAt": "...", "lastUsedAt": "..." }] }
+```
+
+### `PATCH /v1/devices/{deviceId}`
+
+端末名を変更します。本文は`POST /v1/devices`と同じです。成功時は`200 OK`:
+
+```json
+{ "device": { "id": "UUID", "name": "iPad", "createdAt": "...", "updatedAt": "...", "lastUsedAt": "..." } }
+```
+
+対象が存在しない・他人の端末の場合は`404 DEVICE_NOT_FOUND`です。
+
+### `DELETE /v1/devices/{deviceId}`
+
+端末を削除し、そのトークンを無効化します。成功時は`204 No Content`です。対象が存在しない・他人の端末の場合は`404 DEVICE_NOT_FOUND`です。
+
+### `POST /v1/urls`
+
+HTTP(S) URLを共有します。
+
+```json
+{ "url": "https://example.com/" }
+```
+
+URLは絶対HTTP(S) URL、最大4,096文字で、前後の空白は不可です。成功時は`201 Created`:
+
+```json
+{ "url": { "id": "UUID", "url": "https://example.com/", "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "expiresAt": "..." } }
+```
+
+### `GET /v1/urls`
+
+7日以内のURL履歴を新しい順で返します。`200 OK`:
+
+```json
+{
+  "urls": [{ "id": "UUID", "url": "https://example.com/", "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "expiresAt": "..." }],
+  "nextCursor": null
+}
+```
+
+### `DELETE /v1/urls/{urlId}`
+
+自分のURL履歴を削除します。成功時は`204 No Content`、存在しない・他人のURLは`404 URL_NOT_FOUND`です。
+
+### `POST /v1/memos`
+
+メモを追加します。
+
+```json
+{
+  "content": "確認して https://example.com/",
+  "autoDetectUrls": true
+}
+```
+
+`autoDetectUrls`は省略時`false`です。`true`では裸のHTTP(S) URLとMarkdownリンクのリンク先を出現順にURL履歴へ追加します。同じURLは1リクエストにつき1件だけ追加します。本文が前後の空白を除いて裸URLだけの場合、メモは作られません。URL作成とメモ作成は同一トランザクションです。
+
+成功時は常に`201 Created`:
+
+```json
+{
+  "created": [
+    { "type": "url", "url": { "id": "UUID", "url": "https://example.com/", "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "expiresAt": "..." } },
+    { "type": "memo", "memo": { "id": "UUID", "content": "確認して https://example.com/", "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." } }
+  ]
+}
+```
+
+### `GET /v1/memos`
+
+7日以内のメモ履歴を新しい順で返します。`200 OK`:
+
+```json
+{ "memos": [{ "id": "UUID", "content": "メモ本文", "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." }], "nextCursor": null }
+```
+
+### `PATCH /v1/memos/{memoId}`
+
+本文を更新します。
+
+```json
+{ "content": "更新した本文" }
+```
+
+URL自動判定は実行せず、URL履歴も変更しません。成功時は`200 OK`で`{ "memo": Memo }`を返し、`updatedAt`と`expiresAt`は更新時刻・更新から7日後になります。対象が存在しない・他人のメモは`404 MEMO_NOT_FOUND`です。
+
+### `DELETE /v1/memos/{memoId}`
+
+自分のメモを削除します。成功時は`204 No Content`、存在しない・他人のメモは`404 MEMO_NOT_FOUND`です。
+
+### `POST /v1/files`
+
+ファイルを1件アップロードします。Bearer認証と`multipart/form-data`が必要です。フィールド名は必ず`file`です。
+
+```text
+file: <binary>
+```
+
+任意形式を受け付けます。ファイル名は1〜255文字で、制御文字・`/`・`\`は使用できません。ファイル名・MIME typeはmultipartの情報から取得します。MIME typeがなければ`application/octet-stream`です。複数フィールドや100 MiB超過は拒否します。
+
+成功時は`201 Created`:
+
+```json
+{ "file": { "id": "UUID", "name": "document.pdf", "contentType": "application/pdf", "size": 12345, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." } }
+```
+
+### `GET /v1/files`
+
+3日以内のファイルメタデータを新しい順で返します。本体は含みません。`200 OK`:
+
+```json
+{ "files": [{ "id": "UUID", "name": "document.pdf", "contentType": "application/pdf", "size": 12345, "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." }], "nextCursor": null }
+```
+
+### `GET /v1/files/{fileId}`
+
+ファイル本体をダウンロードします。`200 OK`で元のMIME type、サイズ、`Content-Disposition: attachment`を返します。存在しない・他人のファイルは`404 FILE_NOT_FOUND`、Runtime再起動などで本体だけ失われた場合は`404 FILE_CONTENT_NOT_FOUND`です。
+
+### `PATCH /v1/files/{fileId}`
+
+表示名を変更します。
+
+```json
+{ "name": "renamed.pdf" }
+```
+
+成功時は`200 OK`で`{ "file": File }`を返します。`updatedAt`と`expiresAt`は更新時刻・更新から3日後になります。対象が存在しない・他人のファイルは`404 FILE_NOT_FOUND`です。
+
+### `DELETE /v1/files/{fileId}`
+
+自分のファイルメタデータと本体を削除します。成功時は`204 No Content`、存在しない・他人のファイルは`404 FILE_NOT_FOUND`です。
+
+### `GET /v1/latest/{types}`
+
+指定種別から最終更新が新しい1件を返します。`types`には`f`（ファイル）、`u`（URL）、`m`（メモ）を、重複なし・順不同で1文字以上指定します。
+
+| 例 | 比較対象 |
+| --- | --- |
+| `/v1/latest/u` | URLのみ |
+| `/v1/latest/mu` | メモとURL |
+| `/v1/latest/fum` | ファイル、URL、メモ |
+
+URLは`createdAt`、メモとファイルは`updatedAt`を比較します。同時刻は`memo > url > file`の順です。成功時は`200 OK`:
+
+```json
+{ "type": "memo", "memo": { "id": "UUID", "content": "最新のメモ", "sourceDeviceId": "UUID", "sourceDeviceName": "iPhone", "createdAt": "...", "updatedAt": "...", "expiresAt": "..." } }
+```
+
+該当コンテンツがない場合は`404 LATEST_NOT_FOUND`です。無効な`types`は`400 INVALID_LATEST_TYPES`です。
+
+### `GET /healthz`
+
+認証不要のヘルスチェックです。`200 OK`:
+
+```json
+{ "status": "ok" }
 ```
