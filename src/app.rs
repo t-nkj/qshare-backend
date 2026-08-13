@@ -55,6 +55,7 @@ pub fn create_app(state: AppState) -> Router {
         .merge(crate::device::routes())
         .merge(crate::url::routes())
         .merge(crate::memo::routes())
+        .merge(crate::latest::routes())
         .fallback(not_found)
         .layer(RequestBodyLimitLayer::new(JSON_BODY_LIMIT))
         .layer(TraceLayer::new_for_http())

@@ -28,11 +28,21 @@
 | `GET` | `/v1/memos` | Bearer | 7日以内のメモ履歴取得 |
 | `PATCH` | `/v1/memos/{memoId}` | Bearer | メモ編集 |
 | `DELETE` | `/v1/memos/{memoId}` | Bearer | メモ削除 |
+| `GET` | `/v1/latest` | Bearer | URL・メモを含む最終更新コンテンツを取得 |
 | `GET` | `/healthz` | なし | ヘルスチェック |
 
 `GET /v1/urls`は`limit`（既定50、最大100）とカーソルによるページングに対応します。
 `GET /v1/memos`も同じページングに対応します。メモ本文は最大10,000文字です。
 エラーは`{"error":{"code":"...","message":"..."}}`形式です。
+
+`GET /v1/latest`は、URLの`createdAt`とメモの`updatedAt`を比較し、より新しい未期限切れの項目を返します。時刻が同じ場合はメモを返します。
+
+```json
+{
+  "type": "memo",
+  "memo": { "id": "...", "content": "最新のメモ" }
+}
+```
 
 ## メモのURL自動判定
 
